@@ -23,8 +23,9 @@
 -- Disable a default binding without replacing it.
 -- hl.unbind("SUPER + SHIFT + B")
 
--- Handy dictation (https://handy.computer)
-o.bind("CTRL + F1", "Toggle dictation", "handy --toggle-transcription")
+-- Handy dictation (https://handy.computer). SIGUSR2 is the Wayland control
+-- path; `handy --toggle-transcription` hangs on single-instance D-Bus here.
+o.bind("CTRL + F1", "Toggle dictation", os.getenv("HOME") .. "/.local/bin/handy-toggle")
 
 -- Super+Shift+E was Hey Email. Super+Shift+A was ChatGPT.
 -- Toggle Thunderbird / Herdr on special workspaces. Launch puts the next

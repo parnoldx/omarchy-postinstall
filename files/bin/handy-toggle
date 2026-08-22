@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Toggle Handy dictation via SIGUSR2.
+#
+# `handy --toggle-transcription` is supposed to reach the running instance over
+# D-Bus, but those helper processes hang here, so the hotkey never stops a
+# recording. Handy documents SIGUSR2 as the Wayland compositor control path.
+set -euo pipefail
+
+daemon=""
+while read -r pid; do
+  [[ -n $pid ]] || continue
+  cmd=$(ps -o args= -p "$pid" 2>/dev/null || true)
+  case $cmd in
+    *"--toggle-transcription"*|*"--toggle-post-process"*|*"--cancel"*) continue ;;
+  esac
+  daemon=$pid
+  break
+done < <(pgrep -xo handy || true)
+
+if [[ -z $daemon ]]; then
+  if command -v uwsm-app >/dev/null 2>&1; then
+    exec uwsm-app -- handy --start-hidden
+  fi
+  exec handy --start-hidden
+fi
+
+kill -USR2 "$daemon"

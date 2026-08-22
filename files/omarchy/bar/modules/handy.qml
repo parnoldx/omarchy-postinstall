@@ -14,22 +14,16 @@ Item {
   readonly property bool recording: handyState === "recording"
   readonly property bool transcribing: handyState === "transcribing"
   readonly property bool busy: recording || transcribing
+  readonly property string toggleCmd: Quickshell.env("HOME") + "/.local/bin/handy-toggle"
 
   visible: busy
   implicitWidth: busy ? button.implicitWidth : 0
   implicitHeight: bar ? bar.barSize : 26
 
-  function applyLine(raw) {
-    var line = String(raw || "")
-    if (line.indexOf("tray icon change (Recording)") !== -1
-        || line.indexOf("Recording started") !== -1)
-      handyState = "recording"
-    else if (line.indexOf("tray icon change (Transcribing)") !== -1
-        || line.indexOf("Starting async transcription") !== -1)
-      handyState = "transcribing"
-    else if (line.indexOf("tray icon change (Idle)") !== -1
-        || line.indexOf("returned to idle state") !== -1)
-      handyState = "idle"
+  function applyState(raw) {
+    var line = String(raw || "").trim()
+    if (line === "recording" || line === "transcribing" || line === "idle")
+      handyState = line
   }
 
   BarIconButton {
@@ -39,22 +33,19 @@ Item {
     text: root.transcribing ? "󰔟" : "󰍬"
     active: true
     useActiveColor: true
-    tooltipText: root.recording ? "Recording — click to stop" : "Inserting — click to cancel"
+    tooltipText: root.recording ? "Recording — click to stop" : "Transcribing — click to cancel"
     onPressed: function() {
       if (!root.bar) return
-      root.bar.run(root.transcribing ? "handy --cancel" : "handy --toggle-transcription")
+      root.bar.run(root.toggleCmd)
     }
   }
 
   Process {
     id: statusProc
-    command: [
-      "stdbuf", "-oL", "tail", "-n", "80", "-F",
-      Quickshell.env("HOME") + "/.local/share/com.pais.handy/logs/handy.log"
-    ]
+    command: [Quickshell.env("HOME") + "/.config/omarchy/bar/scripts/handy-status"]
     running: true
     stdout: SplitParser {
-      onRead: function(data) { root.applyLine(data) }
+      onRead: function(data) { root.applyState(data) }
     }
     onExited: restartTimer.restart()
   }

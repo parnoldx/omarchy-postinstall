@@ -33,11 +33,11 @@ function layoutHasWidget(layout, id) {
 // LocalSend's item shows no state, offers only Open and Quit, and its primary
 // click is a no-op, so Share > Receive is the whole surface. Hiding it by hand
 // doesn't stick either: LocalSend picks a fresh tray id every launch.
-// Handy is shown as a dedicated bar module left of the clock, so hide its
-// StatusNotifier item from the overflow drawer.
+// Handy stays on the bar as the dedicated mic module, so hide its
+// StatusNotifier item from the tray when that module is in the layout.
 function ownedByOmarchy(item, layout) {
   return itemNamed(item, "localsend")
-    || itemNamed(item, "handy")
+    || (layoutHasWidget(layout, "handy") && itemNamed(item, "handy"))
     || (layoutHasWidget(layout, "omarchy.dropbox") && itemNamed(item, "dropbox"))
 }
 

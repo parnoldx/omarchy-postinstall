@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# Transcribe an audio/video file with Handy's default local model.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF' >&2
+Usage: transcribe [-o FILE] AUDIO_OR_VIDEO
+
+Transcribe an audio or video file with the same local model Handy
+uses for dictation.
+
+Converts to 16 kHz mono 16-bit PCM WAV when needed, then runs
+handy --transcribe-file. The transcript is printed to stdout.
+Pass -o FILE to also write it to a file.
+
+Options:
+  -o, --output FILE   Write transcript to FILE
+  -h, --help          Show this help
+EOF
+  exit "${1:-2}"
+}
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "error: $1 is required" >&2
+    exit 1
+  }
+}
+
+is_handy_wav() {
+  python3 - "$1" <<'PY'
+import sys, wave
+
+path = sys.argv[1]
+try:
+    with wave.open(path, "rb") as w:
+        ok = (
+            w.getnchannels() == 1
+            and w.getframerate() == 16000
+            and w.getsampwidth() == 2
+            and w.getcomptype() in ("NONE", "not compressed")
+        )
+except Exception:
+    ok = False
+sys.exit(0 if ok else 1)
+PY
+}
+
+extract_text() {
+  # Script on fd 3 so stdin stays the handy JSON pipe.
+  python3 /dev/fd/3 3<<'PY'
+import json, sys
+
+raw = sys.stdin.read()
+start = raw.find("{")
+if start < 0:
+    sys.stderr.write("error: handy produced no JSON output\n")
+    sys.exit(1)
+try:
+    obj = json.loads(raw[start:])
+except json.JSONDecodeError as e:
+    sys.stderr.write(f"error: handy JSON was unreadable: {e}\n")
+    sys.exit(1)
+
+text = obj.get("text") or ""
+if text and not text.endswith("\n"):
+    text += "\n"
+sys.stdout.write(text)
+PY
+}
+
+output=""
+input=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h | --help)
+      usage 0
+      ;;
+    -o | --output)
+      [[ $# -ge 2 ]] || {
+        echo "error: $1 needs a file path" >&2
+        usage
+      }
+      output=$2
+      shift 2
+      ;;
+    --)
+      shift
+      [[ $# -eq 1 ]] || usage
+      input=$1
+      break
+      ;;
+    -*)
+      echo "error: unknown option: $1" >&2
+      usage
+      ;;
+    *)
+      [[ -z "$input" ]] || {
+        echo "error: extra argument: $1" >&2
+        usage
+      }
+      input=$1
+      shift
+      ;;
+  esac
+done
+
+[[ -n "$input" ]] || usage
+
+need handy
+need ffmpeg
+need python3
+
+[[ -f "$input" ]] || {
+  echo "error: not a file: $input" >&2
+  exit 2
+}
+
+wav=$input
+tmp=
+cleanup() {
+  [[ -z "${tmp:-}" ]] || rm -rf "$tmp"
+}
+trap cleanup EXIT
+
+if ! is_handy_wav "$input"; then
+  tmp=$(mktemp -d)
+  wav=$tmp/audio.wav
+  echo "converting to 16 kHz mono WAV..." >&2
+  ffmpeg -hide_banner -nostdin -loglevel error -y \
+    -i "$input" -vn -ac 1 -ar 16000 -c:a pcm_s16le -f wav "$wav" \
+    || {
+      echo "error: could not extract 16 kHz mono audio from $input" >&2
+      exit 1
+    }
+fi
+
+echo "transcribing with Handy default model..." >&2
+# Handy logs to stderr; keep them quiet unless the caller set RUST_LOG.
+if [[ -n "$output" ]]; then
+  mkdir -p "$(dirname -- "$output")"
+  RUST_LOG="${RUST_LOG:-error}" handy --transcribe-file "$wav" --json \
+    | extract_text | tee "$output"
+  echo "wrote $output" >&2
+else
+  RUST_LOG="${RUST_LOG:-error}" handy --transcribe-file "$wav" --json \
+    | extract_text
+fi

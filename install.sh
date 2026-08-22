@@ -235,6 +235,8 @@ fi
 log "Installing helper scripts"
 mkdir -p "$HOME/.local/bin"
 install_file "$FILES/bin/ha-licht" "$HOME/.local/bin/ha-licht" 755
+install_file "$FILES/bin/handy-toggle" "$HOME/.local/bin/handy-toggle" 755
+install_file "$FILES/bin/transcribe" "$HOME/.local/bin/transcribe" 755
 install_file "$FILES/bin/omarchy-agent-usage-grok" "$HOME/.local/bin/omarchy-agent-usage-grok" 755
 install_file "$FILES/bin/wetter-plz-lookup" "$HOME/.local/bin/wetter-plz-lookup" 755
 
@@ -378,5 +380,6 @@ if command -v omarchy-shell >/dev/null; then
 fi
 
 log "Done. Open a new session or wait for the shell to hot-reload."
-log "Handy dictation: Ctrl+F1. Thunderbird overlay: Super+Shift+E. Herdr: Super+Shift+A."
+log "Handy dictation: Ctrl+F1. File transcription: transcribe file.mp4 [-o out.txt]."
+log "Thunderbird overlay: Super+Shift+E. Herdr: Super+Shift+A."
 log "Grok usage in the agents panel needs: grok login"
