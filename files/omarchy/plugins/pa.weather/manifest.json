@@ -4,7 +4,7 @@
   "name": "My Weather",
   "version": "1.0.0",
   "author": "Omarchy",
-  "description": "Weather pill with detail popup",
+  "description": "Weather pill with detail popup and a rain radar while precipitation is falling",
   "kinds": [
     "bar-widget"
   ],
@@ -13,7 +13,7 @@
   },
   "barWidget": {
     "displayName": "My Weather",
-    "description": "Weather pill with outdoor temperature and room reading",
+    "description": "Weather pill with outdoor temperature, room reading, and rain radar while precipitation is falling",
     "category": "Info",
     "allowMultiple": false,
     "settingsForm": "weatherSettings",

@@ -234,9 +234,61 @@ function openMeteoCurrentCondition(dailyForecastReport) {
     windspeedKmph: roundedTemp(current.wind_speed_10m),
     windspeedMiles: roundedTemp(current.wind_speed_10m * 0.621371),
     humidity: roundedTemp(current.relative_humidity_2m),
+    precipMM: current.precipitation,
+    precipitation: current.precipitation,
     openMeteoWeatherCode: current.weather_code,
     isDay: current.is_day
   }
+}
+
+// Open-Meteo WMO codes: 0-3 clear/cloud, 45/48 fog, 51+ precipitation
+// (drizzle, rain, snow, showers, thunder).
+function isOpenMeteoPrecipitation(code) {
+  var c = parseInt(String(code), 10)
+  return !isNaN(c) && c >= 51
+}
+
+// wttr.in codes that are not rain, snow, sleet, or thunder: sun, cloud, fog.
+function isWttrPrecipitation(code) {
+  var c = parseInt(String(code), 10)
+  if (isNaN(c) || c <= 0) return false
+  return c !== 113 && c !== 116 && c !== 119 && c !== 122 && c !== 143 && c !== 248 && c !== 260
+}
+
+function precipitationAmount(current) {
+  if (!current) return 0
+  var raw = current.precipitation
+  if (raw === undefined || raw === null || raw === "") raw = current.precipMM
+  var n = parseFloat(String(raw))
+  return isNaN(n) ? 0 : n
+}
+
+// True when current conditions already have rain, snow, showers, or thunder.
+function isPrecipitationPresent(current) {
+  if (!current) return false
+  if (precipitationAmount(current) > 0) return true
+  if (current.openMeteoWeatherCode !== undefined && current.openMeteoWeatherCode !== null)
+    return isOpenMeteoPrecipitation(current.openMeteoWeatherCode)
+  if (current.weatherCode !== undefined && current.weatherCode !== null)
+    return isWttrPrecipitation(current.weatherCode)
+  return false
+}
+
+function isPrecipitationForecastToday(dailyForecastReport, todayString) {
+  var daily = dailyForecastReport && dailyForecastReport.daily ? dailyForecastReport.daily : null
+  if (!daily || !daily.time) return false
+
+  var today = String(todayString || "").slice(0, 10)
+  for (var i = 0; i < daily.time.length; i++) {
+    if (String(daily.time[i]).slice(0, 10) !== today) continue
+    return isOpenMeteoPrecipitation(daily.weather_code ? daily.weather_code[i] : null)
+  }
+  return false
+}
+
+// Radar belongs in the popup only when rain is falling here or forecast today.
+function shouldShowRadar(current, dailyForecastReport, todayString) {
+  return isPrecipitationPresent(current) || isPrecipitationForecastToday(dailyForecastReport, todayString)
 }
 
 function currentIcon(current, fallback) {
@@ -353,6 +405,12 @@ if (typeof module !== "undefined") {
     dayName: dayName,
     openMeteoForecastDays: openMeteoForecastDays,
     openMeteoCurrentCondition: openMeteoCurrentCondition,
+    isOpenMeteoPrecipitation: isOpenMeteoPrecipitation,
+    isWttrPrecipitation: isWttrPrecipitation,
+    precipitationAmount: precipitationAmount,
+    isPrecipitationPresent: isPrecipitationPresent,
+    isPrecipitationForecastToday: isPrecipitationForecastToday,
+    shouldShowRadar: shouldShowRadar,
     currentIcon: currentIcon,
     provisionalCurrentIcon: provisionalCurrentIcon,
     weatherResponseCompletesSave: weatherResponseCompletesSave,

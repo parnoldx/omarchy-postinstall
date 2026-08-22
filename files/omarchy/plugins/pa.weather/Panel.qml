@@ -149,6 +149,30 @@ Panel {
 
   readonly property bool useImperial: Model.shouldUseImperial(setting("unit", ""), Qt.locale().name, reportCountry)
 
+  // Radar centres on stored coordinates, or on the area wttr reported when
+  // the location is still IP-detected. Without a usable pair the map stays
+  // off even if it is raining.
+  readonly property real radarLatitude: {
+    var lat = parseFloat(String(configuredLocationState.latitude))
+    if (!isNaN(lat)) return lat
+    if (areaInfo) {
+      lat = parseFloat(String(areaInfo.latitude || ""))
+      if (!isNaN(lat)) return lat
+    }
+    return Number.NaN
+  }
+  readonly property real radarLongitude: {
+    var lon = parseFloat(String(configuredLocationState.longitude))
+    if (!isNaN(lon)) return lon
+    if (areaInfo) {
+      lon = parseFloat(String(areaInfo.longitude || ""))
+      if (!isNaN(lon)) return lon
+    }
+    return Number.NaN
+  }
+  readonly property bool rainPresent: Model.shouldShowRadar(current, dailyForecastReport, Qt.formatDate(new Date(), "yyyy-MM-dd"))
+  readonly property bool showRadar: rainPresent && isFinite(radarLatitude) && isFinite(radarLongitude)
+
   // Auto-refresh interval in minutes; clamped to a sane minimum.
   readonly property int refreshMinutes: Math.max(1, parseInt(setting("refreshMinutes", 15), 10) || 15)
 
@@ -208,7 +232,7 @@ Panel {
       + "?latitude=" + encodeURIComponent(String(lat))
       + "&longitude=" + encodeURIComponent(String(lon))
       + "&daily=weather_code,temperature_2m_max,temperature_2m_min"
-      + "&current=temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code,is_day"
+      + "&current=temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code,is_day,precipitation"
       + "&forecast_days=4"
       + "&timezone=auto"
     dailyForecastProc.command = ["curl", "-fsS", "--max-time", "5", url]
@@ -561,7 +585,7 @@ Panel {
     open: root.opened
     centerOnBar: true
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(480))
+    contentWidth: panel.fittedContentWidth(Style.space(root.showRadar ? 520 : 480))
     contentHeight: panel.fittedContentHeight(weatherColumn.implicitHeight)
 
     PanelKeyCatcher {
@@ -925,6 +949,17 @@ Panel {
             }
           }
         }
+      }
+
+      // ---- Precipitation radar, only while rain is falling here or
+      //      forecast today. Map is adapted from
+      //      eduardodallecort/omarchy-weather-radar.
+      RadarMap {
+        width: parent.width
+        shown: root.opened && root.showRadar
+        bar: root.bar
+        latitude: root.radarLatitude
+        longitude: root.radarLongitude
       }
 
       // ---- Indoor + dusk sit under the outdoor forecast. Room is a

@@ -143,7 +143,8 @@ desktop:
               Thunderbird/Herdr overlays, Handy, Super+J layout toggle
   Bar         transparent; pa.menu / pa.clock / pa.weather / pa.tray / Handy
   HA          launcher Licht/Leselicht/Abdunkeln + room temp / dusk
-  Weather     asks for a German PLZ, stores the wetter.de location URL locally
+  Weather     asks for a German PLZ, stores the wetter.de location URL locally;
+              popup shows rain radar only while rain is falling or forecast today
   Branding    screensaver + about
   Plymouth    black/white Om on LUKS unlock and SDDM (sudo, initramfs rebuild)
   Agent       pi (mise global, no agent launch)

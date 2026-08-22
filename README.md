@@ -1,7 +1,7 @@
 # omarchy-postinstall
 
 Personal Omarchy post-install. Run it on a fresh box to apply Hyprland overlays, bar plugins, Handy, Home Assistant helpers, branding, Plymouth/SDDM Om unlock, default agent `pi`, and extra packages.
-Home Assistant credentials and a German PLZ are prompted (or passed as env vars) and written only on the target machine.
+Home Assistant credentials and a German PLZ are prompted (or passed as env vars) and written only on the target machine — nothing location-specific is stored in this repo. The weather popup shows a rain radar only while rain is falling here or forecast today.
 
 ## New Omarchy box
 
@@ -22,4 +22,4 @@ HA_URL=http://homeassistant.local:8123 HA_TOKEN=... WEATHER_PLZ=12345 \
 
 `--skip-packages` skips pacman/AUR. `--skip-aur` installs official repos only. `--skip-plymouth` copies the Om logo but does not rebuild the initramfs.
 
-After install, sign into Thunderbird (calendar popup) and run `grok login` (agents usage). Right-click on the weather pill opens the wetter.de forecast resolved from `WEATHER_PLZ`.
+After install, sign into Thunderbird (calendar popup) and run `grok login` (agents usage). Right-click on the weather pill opens the wetter.de forecast resolved from `WEATHER_PLZ`. The weather popup adds a RainViewer map when precipitation is current or forecast today.
