@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh Thunderbird events for the Omarchy clock
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=5min
+AccuracySec=15s
+Persistent=true
+Unit=omarchy-thunderbird-calendar-sync.service
+
+[Install]
+WantedBy=timers.target

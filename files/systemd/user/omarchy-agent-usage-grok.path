@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh Grok usage when the official agents collectors update
+
+[Path]
+PathModified=%h/.local/state/omarchy/agents/usage/claude.json
+PathModified=%h/.local/state/omarchy/agents/usage/codex.json
+PathModified=%h/.local/state/omarchy/agents/usage/fireworks.json
+Unit=omarchy-agent-usage-grok.service
+
+[Install]
+WantedBy=default.target

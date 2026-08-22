@@ -1,0 +1,7 @@
+[Unit]
+Description=Sync Thunderbird calendars into the Omarchy clock popup
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.config/omarchy/plugins/pa.clock/sync-thunderbird-calendar

@@ -1,0 +1,65 @@
+#!/usr/bin/python3
+"""Resolve a German PLZ to a wetter.de location URL.
+
+Prints: <url>\\t<title>
+Used at post-install so the weather pill can open the forecast page later
+without shipping a location in the setup tree.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+import urllib.parse
+import urllib.request
+
+API = "https://api3.wetter.de/api/v1/place-searches?term="
+
+
+def lookup(plz: str) -> tuple[str, str]:
+    req = urllib.request.Request(
+        API + urllib.parse.quote(plz),
+        headers={
+            "Accept": "application/json",
+            "Origin": "https://www.wetter.de",
+            "Referer": "https://www.wetter.de/",
+            "User-Agent": "Mozilla/5.0",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=15) as response:
+        payload = json.load(response)
+
+    ranked: list[tuple[int, str, str]] = []
+    for item in payload.get("data") or []:
+        attrs = item.get("attributes") or {}
+        path = str(attrs.get("url") or "")
+        title = str(attrs.get("title") or "")
+        if not path.startswith("/wetter/"):
+            continue
+        score = 0
+        if plz in title:
+            score += 2
+        if path.startswith("/wetter/r/"):
+            score += 1
+        ranked.append((score, path, title))
+
+    if not ranked:
+        raise SystemExit(f"no wetter.de location for PLZ {plz}")
+
+    ranked.sort(key=lambda row: -row[0])
+    _, path, title = ranked[0]
+    return "https://www.wetter.de" + path, title
+
+
+def main() -> int:
+    if len(sys.argv) != 2 or not re.fullmatch(r"[0-9]{5}", sys.argv[1]):
+        print("Usage: wetter-plz-lookup <5-digit-plz>", file=sys.stderr)
+        return 2
+    url, title = lookup(sys.argv[1])
+    print(f"{url}\t{title}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

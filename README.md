@@ -1,0 +1,25 @@
+# omarchy-postinstall
+
+Personal Omarchy post-install. Run it on a fresh box to apply Hyprland overlays, bar plugins, Handy, Home Assistant helpers, branding, Plymouth/SDDM Om unlock, default agent `pi`, and extra packages.
+Home Assistant credentials and a German PLZ are prompted (or passed as env vars) and written only on the target machine.
+
+## New Omarchy box
+
+In a terminal (needs `sudo` for packages and Plymouth):
+
+```bash
+git clone https://github.com/parnoldx/omarchy-postinstall.git ~/work/omarchy-postinstall
+~/work/omarchy-postinstall/install.sh
+```
+
+Non-interactive, with secrets already in the environment:
+
+```bash
+git clone https://github.com/parnoldx/omarchy-postinstall.git ~/work/omarchy-postinstall
+HA_URL=http://homeassistant.local:8123 HA_TOKEN=... WEATHER_PLZ=12345 \
+  ~/work/omarchy-postinstall/install.sh --yes
+```
+
+`--skip-packages` skips pacman/AUR. `--skip-aur` installs official repos only. `--skip-plymouth` copies the Om logo but does not rebuild the initramfs.
+
+After install, sign into Thunderbird (calendar popup) and run `grok login` (agents usage). Right-click on the weather pill opens the wetter.de forecast resolved from `WEATHER_PLZ`.

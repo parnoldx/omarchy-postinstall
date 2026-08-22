@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "pa.menu",
+  "name": "Om menu",
+  "version": "1.0.0",
+  "author": "pa",
+  "description": "Omarchy menu launcher with the Om bar icon",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Om menu",
+    "description": "Opens the Omarchy menu; uses the Om symbol as the bar icon",
+    "category": "Compositor",
+    "allowMultiple": false,
+    "defaultSection": "left"
+  }
+}

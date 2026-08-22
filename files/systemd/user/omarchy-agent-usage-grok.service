@@ -1,0 +1,7 @@
+[Unit]
+Description=Collect Grok usage for the Omarchy agents panel
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/omarchy-agent-usage-grok --write

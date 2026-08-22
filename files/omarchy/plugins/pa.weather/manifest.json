@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "id": "pa.weather",
+  "name": "My Weather",
+  "version": "1.0.0",
+  "author": "Omarchy",
+  "description": "Weather pill with detail popup",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "My Weather",
+    "description": "Weather pill with outdoor temperature and room reading",
+    "category": "Info",
+    "allowMultiple": false,
+    "settingsForm": "weatherSettings",
+    "defaults": {
+      "roomEntity": "sensor.tvr_temperature",
+      "duskEntity": "sensor.sun_next_dusk",
+      "wetterUrl": ""
+    },
+    "schema": [
+      {
+        "key": "roomEntity",
+        "type": "string",
+        "label": "Room temperature entity",
+        "description": "Home Assistant entity_id for indoor temperature (credentials in ~/.config/homeassistant/)",
+        "defaultValue": "sensor.tvr_temperature"
+      },
+      {
+        "key": "duskEntity",
+        "type": "string",
+        "label": "Next dusk entity",
+        "description": "Home Assistant timestamp entity for next evening twilight",
+        "defaultValue": "sensor.sun_next_dusk"
+      },
+      {
+        "key": "wetterUrl",
+        "type": "string",
+        "label": "wetter.de forecast URL",
+        "description": "Resolved at setup from a German PLZ; right-click opens this page",
+        "defaultValue": ""
+      }
+    ]
+  },
+  "omarchy": {
+    "clonedFrom": "omarchy.weather"
+  }
+}

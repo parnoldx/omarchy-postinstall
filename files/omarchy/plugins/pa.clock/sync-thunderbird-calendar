@@ -1,0 +1,810 @@
+#!/usr/bin/env python3
+"""Read Thunderbird calendars and write ~/.local/state/omarchy/calendar-events.json.
+
+Pulls enabled CalDAV calendars from the Thunderbird profile using the
+password already saved in logins.json. Local storage calendars are read
+from calendar-data/local.sqlite as well.
+"""
+
+from __future__ import annotations
+
+import base64
+import ctypes
+import json
+import os
+import re
+import sqlite3
+import sys
+import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+HOME = Path.home()
+STATE_PATH = HOME / ".local/state/omarchy/calendar-events.json"
+PAST_DAYS = 21
+FUTURE_DAYS = 90
+DEFAULT_TZ_NAME = "Europe/Berlin"
+WEEKDAYS = {"MO": 0, "TU": 1, "WE": 2, "TH": 3, "FR": 4, "SA": 5, "SU": 6}
+
+
+class SECItem(ctypes.Structure):
+    _fields_ = [
+        ("type", ctypes.c_uint),
+        ("data", ctypes.c_void_p),
+        ("len", ctypes.c_uint),
+    ]
+
+
+def load_nss(profile: Path):
+    nss = ctypes.CDLL("libnss3.so")
+    nss.NSS_Init.argtypes = [ctypes.c_char_p]
+    nss.NSS_Init.restype = ctypes.c_int
+    nss.PK11SDR_Decrypt.argtypes = [
+        ctypes.POINTER(SECItem),
+        ctypes.POINTER(SECItem),
+        ctypes.c_void_p,
+    ]
+    nss.PK11SDR_Decrypt.restype = ctypes.c_int
+    nss.NSS_Shutdown.restype = ctypes.c_int
+    if nss.NSS_Init(b"sql:" + os.fsencode(profile)) != 0:
+        if nss.NSS_Init(os.fsencode(profile)) != 0:
+            raise RuntimeError(f"NSS_Init failed for {profile}")
+    return nss
+
+
+def nss_decrypt(nss, blob: str) -> str:
+    raw = base64.b64decode(blob)
+    buf = ctypes.create_string_buffer(raw, len(raw))
+    inp = SECItem(0, ctypes.cast(buf, ctypes.c_void_p), len(raw))
+    out = SECItem()
+    if nss.PK11SDR_Decrypt(ctypes.byref(inp), ctypes.byref(out), None) != 0:
+        raise RuntimeError("could not decrypt a Thunderbird login")
+    return ctypes.string_at(out.data, out.len).decode("utf-8")
+
+
+def thunderbird_profile() -> Path:
+    ini = HOME / ".thunderbird" / "profiles.ini"
+    if not ini.is_file():
+        raise RuntimeError("no Thunderbird profiles.ini")
+
+    sections: list[dict[str, str]] = []
+    current: dict[str, str] = {}
+    for raw in ini.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith(";"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            if current:
+                sections.append(current)
+            current = {"_name": line[1:-1]}
+            continue
+        if "=" in line:
+            key, value = line.split("=", 1)
+            current[key.strip()] = value.strip()
+    if current:
+        sections.append(current)
+
+    chosen = None
+    for section in sections:
+        if section.get("_name", "").startswith("Install") and section.get("Default"):
+            chosen = section["Default"]
+            break
+    if chosen is None:
+        for section in sections:
+            if section.get("Default") == "1" and section.get("Path"):
+                chosen = section["Path"]
+                break
+    if chosen is None:
+        for section in sections:
+            if section.get("Path"):
+                chosen = section["Path"]
+                break
+    if not chosen:
+        raise RuntimeError("no Thunderbird profile path")
+
+    path = Path(chosen)
+    if not path.is_absolute():
+        path = HOME / ".thunderbird" / path
+    return path
+
+
+def parse_prefs(prefs_js: Path) -> dict:
+    calendars: dict[str, dict] = {}
+    local_tz = DEFAULT_TZ_NAME
+    pref_re = re.compile(r'^user_pref\("([^"]+)",\s*(.+)\);\s*$')
+    for raw in prefs_js.read_text(encoding="utf-8", errors="replace").splitlines():
+        match = pref_re.match(raw)
+        if not match:
+            continue
+        key, value = match.group(1), match.group(2)
+        if key == "calendar.timezone.local" and value.startswith('"'):
+            local_tz = json.loads(value)
+            continue
+        m = re.match(r"calendar\.registry\.([^.]+)\.(.+)", key)
+        if not m:
+            continue
+        cal_id, field = m.group(1), m.group(2)
+        calendars.setdefault(cal_id, {"id": cal_id})
+        if value in ("true", "false"):
+            calendars[cal_id][field] = value == "true"
+        elif value.startswith('"'):
+            calendars[cal_id][field] = json.loads(value)
+        else:
+            calendars[cal_id][field] = value
+    return {"calendars": calendars, "timezone": local_tz or DEFAULT_TZ_NAME}
+
+
+def dav_credentials(profile: Path, nss, host_prefix: str) -> tuple[str, str] | None:
+    logins_path = profile / "logins.json"
+    if not logins_path.is_file():
+        return None
+    doc = json.loads(logins_path.read_text(encoding="utf-8"))
+    for login in doc.get("logins", []):
+        host = str(login.get("hostname") or "")
+        if host.rstrip("/") == host_prefix.rstrip("/") or host_prefix.rstrip("/") in host:
+            user = nss_decrypt(nss, login["encryptedUsername"])
+            password = nss_decrypt(nss, login["encryptedPassword"])
+            return user, password
+    return None
+
+
+def unfold_ics(text: str) -> str:
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return re.sub(r"\n[ \t]", "", text)
+
+
+def unescape_ics(value: str) -> str:
+    out = []
+    i = 0
+    while i < len(value):
+        if value[i] == "\\" and i + 1 < len(value):
+            nxt = value[i + 1]
+            out.append({"n": "\n", "N": "\n", ",": ",", ";": ";", "\\": "\\"}.get(nxt, nxt))
+            i += 2
+            continue
+        out.append(value[i])
+        i += 1
+    return "".join(out)
+
+
+def parse_ics_props(block: str) -> list[tuple[str, dict[str, str], str]]:
+    props = []
+    for line in unfold_ics(block).split("\n"):
+        if not line or ":" not in line:
+            continue
+        head, value = line.split(":", 1)
+        parts = head.split(";")
+        name = parts[0].upper()
+        params = {}
+        for part in parts[1:]:
+            if "=" in part:
+                pk, pv = part.split("=", 1)
+                params[pk.upper()] = pv
+        props.append((name, params, value))
+    return props
+
+
+def ics_components(text: str, name: str) -> list[str]:
+    pattern = re.compile(rf"BEGIN:{name}\r?\n(.*?)\r?\nEND:{name}", re.S | re.I)
+    return [m.group(0) for m in pattern.finditer(text)]
+
+
+def parse_offset(text: str) -> timedelta:
+    sign = -1 if text.startswith("-") else 1
+    body = text[1:] if text[:1] in "+-" else text
+    hours = int(body[0:2])
+    minutes = int(body[2:4]) if len(body) >= 4 else 0
+    return sign * timedelta(hours=hours, minutes=minutes)
+
+
+def parse_duration(text: str) -> timedelta:
+    match = re.fullmatch(
+        r"([+-])?P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?",
+        text.strip(),
+    )
+    if not match:
+        return timedelta(hours=1)
+    sign = -1 if match.group(1) == "-" else 1
+    weeks = int(match.group(2) or 0)
+    days = int(match.group(3) or 0)
+    hours = int(match.group(4) or 0)
+    minutes = int(match.group(5) or 0)
+    seconds = int(match.group(6) or 0)
+    return sign * timedelta(weeks=weeks, days=days, hours=hours, minutes=minutes, seconds=seconds)
+
+
+def parse_ics_time(value: str, params: dict[str, str], default_tz: ZoneInfo):
+    value = value.strip()
+    if params.get("VALUE", "").upper() == "DATE" or (len(value) == 8 and value.isdigit()):
+        return date(int(value[0:4]), int(value[4:6]), int(value[6:8])), True
+
+    stamp = value
+    utc = stamp.endswith("Z")
+    if utc:
+        stamp = stamp[:-1]
+    if "T" not in stamp:
+        return date(int(stamp[0:4]), int(stamp[4:6]), int(stamp[6:8])), True
+
+    day, clock = stamp.split("T", 1)
+    year, month, day_n = int(day[0:4]), int(day[4:6]), int(day[6:8])
+    hour, minute = int(clock[0:2]), int(clock[2:4])
+    second = int(clock[4:6]) if len(clock) >= 6 else 0
+    naive = datetime(year, month, day_n, hour, minute, second)
+    if utc:
+        return naive.replace(tzinfo=timezone.utc).astimezone(default_tz), False
+    tzid = params.get("TZID")
+    if tzid:
+        try:
+            tz = ZoneInfo(tzid.split(":")[-1])
+        except Exception:
+            tz = default_tz
+        return naive.replace(tzinfo=tz).astimezone(default_tz), False
+    return naive.replace(tzinfo=default_tz), False
+
+
+def as_date(value) -> date:
+    return value if isinstance(value, date) and not isinstance(value, datetime) else value.date()
+
+
+def add_months(year: int, month: int, day: int, delta: int) -> date:
+    total = year * 12 + (month - 1) + delta
+    y, m = divmod(total, 12)
+    last = (date(y, m + 1, 1) - timedelta(days=1)).day if m < 11 else 31
+    if m == 11:
+        last = 31
+    else:
+        last = (date(y, m + 2, 1) - timedelta(days=1)).day if m < 11 else 31
+        if m == 11:
+            last = 31
+    # recompute last day of target month
+    nm = m + 1
+    if nm == 12:
+        last = 31
+    else:
+        last = (date(y, nm + 1, 1) - timedelta(days=1)).day
+    return date(y, nm, min(day, last))
+
+
+def parse_byday(token: str) -> tuple[int | None, int]:
+    m = re.fullmatch(r"([+-]?\d+)?(MO|TU|WE|TH|FR|SA|SU)", token)
+    if not m:
+        return None, 0
+    nth = int(m.group(1)) if m.group(1) else None
+    return nth, WEEKDAYS[m.group(2)]
+
+
+def nth_weekday(year: int, month: int, weekday: int, nth: int) -> date | None:
+    if nth > 0:
+        first = date(year, month, 1)
+        shift = (weekday - first.weekday()) % 7
+        day = 1 + shift + (nth - 1) * 7
+        last = (date(year + (1 if month == 12 else 0), 1 if month == 12 else month + 1, 1) - timedelta(days=1)).day
+        if day > last:
+            return None
+        return date(year, month, day)
+    last = (date(year + (1 if month == 12 else 0), 1 if month == 12 else month + 1, 1) - timedelta(days=1)).day
+    last_date = date(year, month, last)
+    shift = (last_date.weekday() - weekday) % 7
+    day = last - shift + (nth + 1) * 7
+    if day < 1:
+        return None
+    return date(year, month, day)
+
+
+def expand_rrule(start, rrule: str, window_start: datetime, window_end: datetime):
+    if not rrule:
+        return [start]
+    parts = {}
+    for piece in rrule.split(";"):
+        if "=" in piece:
+            key, value = piece.split("=", 1)
+            parts[key.upper()] = value
+
+    freq = parts.get("FREQ", "").upper()
+    interval = int(parts.get("INTERVAL") or 1) or 1
+    count = int(parts.get("COUNT")) if parts.get("COUNT") else None
+    until = None
+    if parts.get("UNTIL"):
+        until, _ = parse_ics_time(parts["UNTIL"], {}, timezone.utc)
+        if isinstance(until, datetime) and until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+
+    byday = [parse_byday(tok) for tok in parts.get("BYDAY", "").split(",") if tok]
+    bymonthday = [int(x) for x in parts.get("BYMONTHDAY", "").split(",") if x]
+    bymonth = [int(x) for x in parts.get("BYMONTH", "").split(",") if x]
+
+    start_dt = start if isinstance(start, datetime) else datetime.combine(start, datetime.min.time())
+    if isinstance(start, datetime) and start.tzinfo:
+        start_dt = start
+    elif isinstance(start, datetime):
+        start_dt = start.replace(tzinfo=window_start.tzinfo)
+    else:
+        start_dt = datetime.combine(start, datetime.min.time(), tzinfo=window_start.tzinfo)
+
+    out = []
+    seen = 0
+    guard = 0
+    cursor = start_dt
+
+    def accept(occ):
+        nonlocal seen
+        if until is not None:
+            occ_cmp = occ if isinstance(occ, datetime) else datetime.combine(occ, datetime.min.time(), tzinfo=timezone.utc)
+            until_cmp = until if isinstance(until, datetime) else datetime.combine(until, datetime.max.time(), tzinfo=timezone.utc)
+            if occ_cmp > until_cmp:
+                return False
+        if count is not None and seen >= count:
+            return False
+        seen += 1
+        out.append(occ)
+        return count is None or seen < count
+
+    if freq == "DAILY":
+        while cursor <= window_end and guard < 800:
+            guard += 1
+            if cursor >= window_start or cursor == start_dt:
+                if not accept(cursor if isinstance(start, datetime) else cursor.date()):
+                    break
+            cursor = cursor + timedelta(days=interval)
+        return out
+
+    if freq == "WEEKLY":
+        wanted = {wd for _, wd in byday} or {start_dt.weekday()}
+        week = start_dt - timedelta(days=start_dt.weekday())
+        while week <= window_end and guard < 800:
+            guard += 1
+            for wd in range(7):
+                occ = week + timedelta(days=wd)
+                if occ.weekday() not in wanted or occ < start_dt:
+                    continue
+                if occ > window_end:
+                    continue
+                payload = occ if isinstance(start, datetime) else occ.date()
+                if not accept(payload):
+                    return out
+            week = week + timedelta(weeks=interval)
+        return out
+
+    if freq in ("MONTHLY", "YEARLY"):
+        year, month = start_dt.year, start_dt.month
+        step = interval * (12 if freq == "YEARLY" else 1)
+        while guard < 400:
+            guard += 1
+            months = [month] if not bymonth else bymonth
+            if freq == "YEARLY" and bymonth:
+                months = bymonth
+            for m in months:
+                candidates = []
+                if bymonthday:
+                    last = (date(year + (1 if m == 12 else 0), 1 if m == 12 else m + 1, 1) - timedelta(days=1)).day
+                    for d in bymonthday:
+                        day_n = last + 1 + d if d < 0 else d
+                        if 1 <= day_n <= last:
+                            candidates.append(date(year, m, day_n))
+                elif byday:
+                    for nth, wd in byday:
+                        hit = nth_weekday(year, m, wd, nth or 1)
+                        if hit:
+                            candidates.append(hit)
+                else:
+                    try:
+                        candidates.append(date(year, m, start_dt.day))
+                    except ValueError:
+                        last = (date(year + (1 if m == 12 else 0), 1 if m == 12 else m + 1, 1) - timedelta(days=1)).day
+                        candidates.append(date(year, m, last))
+                for day in candidates:
+                    if day < start_dt.date():
+                        continue
+                    if isinstance(start, datetime):
+                        occ = datetime(day.year, day.month, day.day, start_dt.hour, start_dt.minute, start_dt.second, tzinfo=start_dt.tzinfo)
+                    else:
+                        occ = day
+                    occ_dt = occ if isinstance(occ, datetime) else datetime.combine(occ, datetime.min.time(), tzinfo=window_start.tzinfo)
+                    if occ_dt > window_end:
+                        return out
+                    if not accept(occ):
+                        return out
+            if freq == "YEARLY":
+                year += interval
+            else:
+                month += interval
+                while month > 12:
+                    month -= 12
+                    year += 1
+            if date(year, month if freq == "MONTHLY" else 1, 1) > window_end.date() + timedelta(days=31):
+                break
+        return out
+
+    return [start]
+
+
+def iter_days(start_day: date, end_day: date):
+    cur = start_day
+    while cur <= end_day:
+        yield cur
+        cur += timedelta(days=1)
+
+
+def iso_local(dt: datetime) -> str:
+    return dt.isoformat(timespec="seconds")
+
+
+def date_key(d: date) -> str:
+    return f"{d.year:04d}-{d.month:02d}-{d.day:02d}"
+
+
+def extract_calendar_data(xml_text: str) -> list[str]:
+    payloads = []
+    try:
+        root = ET.fromstring(xml_text)
+        for el in root.iter():
+            if el.tag.endswith("calendar-data") and el.text and "BEGIN:VCALENDAR" in el.text:
+                payloads.append(el.text)
+    except ET.ParseError:
+        pass
+    if not payloads:
+        payloads = re.findall(r"BEGIN:VCALENDAR.*?END:VCALENDAR", xml_text, re.S)
+    return payloads
+
+
+def events_from_vevent(block: str, calendar: dict, default_tz: ZoneInfo, window_start: datetime, window_end: datetime) -> list[dict]:
+    props = parse_ics_props(block)
+    fields: dict[str, list[tuple[dict[str, str], str]]] = {}
+    in_alarm = False
+    for name, params, value in props:
+        if name == "BEGIN" and value.upper() == "VALARM":
+            in_alarm = True
+            continue
+        if name == "END" and value.upper() == "VALARM":
+            in_alarm = False
+            continue
+        if in_alarm or name in ("BEGIN", "END"):
+            continue
+        fields.setdefault(name, []).append((params, value))
+
+    if "DTSTART" not in fields:
+        return []
+
+    start_params, start_raw = fields["DTSTART"][0]
+    start, all_day = parse_ics_time(start_raw, start_params, default_tz)
+
+    if "DTEND" in fields:
+        end, _ = parse_ics_time(fields["DTEND"][0][1], fields["DTEND"][0][0], default_tz)
+    elif "DURATION" in fields:
+        duration = parse_duration(fields["DURATION"][0][1])
+        end = (datetime.combine(start, datetime.min.time()) if all_day else start) + duration
+        if all_day:
+            end = end.date() if isinstance(end, datetime) else end
+    else:
+        end = start + (timedelta(days=1) if all_day else timedelta(hours=1))
+
+    title = unescape_ics(fields.get("SUMMARY", [({}, "")])[0][1]).strip() or "(no title)"
+    location = unescape_ics(fields.get("LOCATION", [({}, "")])[0][1]).strip()
+    uid = fields.get("UID", [({}, "")])[0][1].strip() or title
+    rrule = fields.get("RRULE", [({}, "")])[0][1].strip()
+    description = unescape_ics(fields.get("DESCRIPTION", [({}, "")])[0][1])
+    url = unescape_ics(fields.get("URL", [({}, "")])[0][1]).strip()
+
+    meeting = ""
+    for candidate in (url, location, description):
+        found = re.search(r"https://[^\s<>\"]+", candidate or "")
+        if found and re.search(r"meet\.|zoom\.|teams\.|jitsi|whereby", found.group(0), re.I):
+            meeting = found.group(0).rstrip(").,;")
+            break
+
+    occurrences = expand_rrule(start, rrule, window_start, window_end) if rrule else [start]
+    events = []
+    duration = None
+    if isinstance(start, datetime) and isinstance(end, datetime):
+        duration = end - start
+    elif all_day:
+        duration = as_date(end) - as_date(start)
+
+    for occ in occurrences:
+        if all_day:
+            occ_start_day = as_date(occ)
+            span = duration if isinstance(duration, timedelta) else timedelta(days=1)
+            occ_end_day = occ_start_day + span
+            last_day = occ_end_day - timedelta(days=1)
+            if last_day < occ_start_day:
+                last_day = occ_start_day
+            start_iso = occ_start_day.isoformat()
+            end_iso = occ_end_day.isoformat()
+            for day in iter_days(occ_start_day, last_day):
+                if day < window_start.date() or day > window_end.date():
+                    continue
+                events.append({
+                    "id": uid,
+                    "calendarId": calendar["id"],
+                    "calendarName": calendar.get("name") or calendar["id"],
+                    "color": calendar.get("color") or "#7aa2f7",
+                    "dateKey": date_key(day),
+                    "start": start_iso,
+                    "end": end_iso,
+                    "allDay": True,
+                    "title": title,
+                    "location": location,
+                    "time": "",
+                    "meetingUrl": meeting,
+                })
+            continue
+
+        if not isinstance(occ, datetime):
+            occ = datetime.combine(occ, start.time() if isinstance(start, datetime) else datetime.min.time(), tzinfo=default_tz)
+        occ_end = occ + (duration if isinstance(duration, timedelta) else timedelta(hours=1))
+        if occ_end < window_start or occ > window_end:
+            continue
+        first_day = occ.date()
+        last_day = (occ_end - timedelta(seconds=1)).date()
+        for day in iter_days(first_day, last_day):
+            if day < window_start.date() or day > window_end.date():
+                continue
+            events.append({
+                "id": uid,
+                "calendarId": calendar["id"],
+                "calendarName": calendar.get("name") or calendar["id"],
+                "color": calendar.get("color") or "#7aa2f7",
+                "dateKey": date_key(day),
+                "start": iso_local(occ),
+                "end": iso_local(occ_end),
+                "allDay": False,
+                "title": title,
+                "location": location,
+                "time": occ.strftime("%H:%M"),
+                "meetingUrl": meeting,
+            })
+    return events
+
+
+def caldav_report(url: str, user: str, password: str, start: datetime, end: datetime) -> str:
+    body = f"""<?xml version="1.0" encoding="utf-8" ?>
+<C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:prop>
+    <D:getetag/>
+    <C:calendar-data/>
+  </D:prop>
+  <C:filter>
+    <C:comp-filter name="VCALENDAR">
+      <C:comp-filter name="VEVENT">
+        <C:time-range start="{start.strftime('%Y%m%dT%H%M%SZ')}" end="{end.strftime('%Y%m%dT%H%M%SZ')}"/>
+      </C:comp-filter>
+    </C:comp-filter>
+  </C:filter>
+</C:calendar-query>"""
+    origin = urllib.parse.urlparse(url)
+    root = f"{origin.scheme}://{origin.netloc}"
+    pwd_mgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+    pwd_mgr.add_password(None, root, user, password)
+    opener = urllib.request.build_opener(urllib.request.HTTPBasicAuthHandler(pwd_mgr))
+    req = urllib.request.Request(
+        url if url.endswith("/") else url + "/",
+        data=body.encode("utf-8"),
+        method="REPORT",
+        headers={
+            "Content-Type": "application/xml; charset=utf-8",
+            "Depth": "1",
+            "User-Agent": "omarchy-pa-clock/1.0",
+        },
+    )
+    with opener.open(req, timeout=45) as resp:
+        return resp.read().decode("utf-8", "replace")
+
+
+def snapshot_sqlite(src: Path) -> Path | None:
+    if not src.is_file():
+        return None
+    import shutil
+
+    fd, tmp_name = tempfile.mkstemp(prefix="tb-cal-", suffix=".sqlite")
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        shutil.copyfile(src, tmp)
+        wal = Path(str(src) + "-wal")
+        if wal.is_file() and wal.stat().st_size > 0:
+            shutil.copyfile(wal, Path(str(tmp) + "-wal"))
+        return tmp
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        Path(str(tmp) + "-wal").unlink(missing_ok=True)
+        return None
+
+
+def events_from_local_sqlite(profile: Path, calendars: dict, default_tz: ZoneInfo, window_start: datetime, window_end: datetime) -> list[dict]:
+    db = snapshot_sqlite(profile / "calendar-data" / "local.sqlite")
+    if db is None:
+        return []
+    out = []
+    try:
+        con = sqlite3.connect(db)
+        con.row_factory = sqlite3.Row
+        try:
+            rows = con.execute(
+                "SELECT cal_id, id, title, event_start, event_end, event_start_tz, flags FROM cal_events"
+            ).fetchall()
+        except sqlite3.Error:
+            rows = []
+        for row in rows:
+            cal = calendars.get(row["cal_id"]) or {
+                "id": row["cal_id"],
+                "name": row["cal_id"],
+                "color": "#7aa2f7",
+            }
+            if cal.get("disabled"):
+                continue
+            start_us = row["event_start"]
+            end_us = row["event_end"]
+            if not start_us:
+                continue
+            start = datetime.fromtimestamp(start_us / 1_000_000, tz=timezone.utc).astimezone(default_tz)
+            end = datetime.fromtimestamp((end_us or start_us) / 1_000_000, tz=timezone.utc).astimezone(default_tz)
+            flags = int(row["flags"] or 0)
+            all_day = bool(flags & 8) or str(row["event_start_tz"] or "") in ("floating",)
+            title = row["title"] or "(no title)"
+            uid = row["id"] or title
+            if all_day:
+                first = start.date()
+                last = (end.date() - timedelta(days=1)) if end.date() > start.date() else start.date()
+                for day in iter_days(first, last):
+                    if day < window_start.date() or day > window_end.date():
+                        continue
+                    out.append({
+                        "id": uid,
+                        "calendarId": cal["id"],
+                        "calendarName": cal.get("name") or cal["id"],
+                        "color": cal.get("color") or "#7aa2f7",
+                        "dateKey": date_key(day),
+                        "start": first.isoformat(),
+                        "end": (last + timedelta(days=1)).isoformat(),
+                        "allDay": True,
+                        "title": title,
+                        "location": "",
+                        "time": "",
+                        "meetingUrl": "",
+                    })
+            else:
+                if end < window_start or start > window_end:
+                    continue
+                first = start.date()
+                last = (end - timedelta(seconds=1)).date()
+                for day in iter_days(first, last):
+                    if day < window_start.date() or day > window_end.date():
+                        continue
+                    out.append({
+                        "id": uid,
+                        "calendarId": cal["id"],
+                        "calendarName": cal.get("name") or cal["id"],
+                        "color": cal.get("color") or "#7aa2f7",
+                        "dateKey": date_key(day),
+                        "start": iso_local(start),
+                        "end": iso_local(end),
+                        "allDay": False,
+                        "title": title,
+                        "location": "",
+                        "time": start.strftime("%H:%M"),
+                        "meetingUrl": "",
+                    })
+        con.close()
+    finally:
+        db.unlink(missing_ok=True)
+        Path(str(db) + "-wal").unlink(missing_ok=True)
+    return out
+
+
+def write_atomic(path: Path, doc: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix="calendar-events-", suffix=".json", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(doc, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def main() -> int:
+    import socket
+
+    socket.setdefaulttimeout(30)
+    profile = thunderbird_profile()
+    prefs = parse_prefs(profile / "prefs.js")
+    try:
+        default_tz = ZoneInfo(prefs["timezone"])
+    except Exception:
+        default_tz = ZoneInfo(DEFAULT_TZ_NAME)
+
+    now = datetime.now(default_tz)
+    window_start = (now - timedelta(days=PAST_DAYS)).replace(hour=0, minute=0, second=0, microsecond=0)
+    window_end = (now + timedelta(days=FUTURE_DAYS)).replace(hour=23, minute=59, second=59, microsecond=0)
+    utc_start = window_start.astimezone(timezone.utc)
+    utc_end = window_end.astimezone(timezone.utc)
+
+    nss = load_nss(profile)
+    events: list[dict] = []
+    sources = []
+    errors = []
+
+    cred_cache: dict[str, tuple[str, str] | None] = {}
+
+    for cal in prefs["calendars"].values():
+        if cal.get("disabled"):
+            continue
+        if cal.get("type") != "caldav":
+            continue
+        name = str(cal.get("name") or "")
+        if name.casefold() in ("aufgaben", "tasks", "todos"):
+            continue
+        uri = cal.get("uri") or ""
+        if not uri.startswith("https://"):
+            continue
+        parsed = urllib.parse.urlparse(uri)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        if origin not in cred_cache:
+            try:
+                cred_cache[origin] = dav_credentials(profile, nss, origin)
+            except Exception as exc:
+                cred_cache[origin] = None
+                errors.append(f"{cal.get('name')}: {exc}")
+        creds = cred_cache[origin]
+        if not creds:
+            errors.append(f"{cal.get('name') or uri}: no saved Thunderbird password")
+            continue
+        try:
+            xml_text = caldav_report(uri, creds[0], creds[1], utc_start, utc_end)
+            payloads = extract_calendar_data(xml_text)
+            count_before = len(events)
+            for payload in payloads:
+                for vevent in ics_components(payload, "VEVENT"):
+                    events.extend(events_from_vevent(vevent, cal, default_tz, window_start, window_end))
+            sources.append(f"{cal.get('name')}:{len(events) - count_before}")
+        except urllib.error.HTTPError as exc:
+            errors.append(f"{cal.get('name')}: HTTP {exc.code}")
+        except Exception as exc:
+            errors.append(f"{cal.get('name')}: {exc}")
+
+    try:
+        local_events = events_from_local_sqlite(profile, prefs["calendars"], default_tz, window_start, window_end)
+        if local_events:
+            events.extend(local_events)
+            sources.append(f"local:{len(local_events)}")
+    except Exception as exc:
+        errors.append(f"local sqlite: {exc}")
+
+    try:
+        nss.NSS_Shutdown()
+    except Exception:
+        pass
+
+    # Unique by id+dateKey, last write wins so CalDAV overrides an older local copy.
+    unique: dict[str, dict] = {}
+    for event in events:
+        unique[f"{event['id']}|{event['dateKey']}"] = event
+    events = sorted(unique.values(), key=lambda e: (e["dateKey"], e.get("start") or "", e["title"]))
+
+    doc = {
+        "version": 1,
+        "syncedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "source": "thunderbird:" + ",".join(sources) if sources else "thunderbird",
+        "events": events,
+    }
+    if errors:
+        doc["errors"] = errors
+    write_atomic(STATE_PATH, doc)
+    print(f"wrote {len(events)} events from {doc['source']}")
+    for err in errors:
+        print(f"warning: {err}", file=sys.stderr)
+    return 0 if events or not errors else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

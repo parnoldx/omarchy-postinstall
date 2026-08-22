@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Show the Thunderbird mail overlay (do not hide it if it is already up)
+# and switch the running window to the calendar tab.
+set -u
+
+mail_visible() {
+  hyprctl monitors -j 2>/dev/null | python3 -c '
+import json, sys
+try:
+    monitors = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+sys.exit(0 if any((m.get("specialWorkspace") or {}).get("name") == "special:mail" for m in monitors) else 1)
+'
+}
+
+thunderbird_address() {
+  hyprctl clients -j 2>/dev/null | python3 -c '
+import json, sys
+try:
+    clients = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for client in clients:
+    blob = ((client.get("class") or "") + " " + (client.get("initialClass") or "")).lower()
+    if "thunderbird" in blob:
+        print(client.get("address") or "")
+        break
+'
+}
+
+# Omarchy Hyprland is Lua-dispatched; the old togglespecialworkspace keyword
+# is rejected. Match Super+Shift+E: toggle_special("mail"), but only to show.
+if ! mail_visible; then
+  hyprctl dispatch 'hl.dsp.workspace.toggle_special("mail")' >/dev/null
+fi
+
+addr="$(thunderbird_address)"
+if [[ -n "$addr" ]]; then
+  hyprctl dispatch "hl.dsp.focus({ window = \"address:$addr\" })" >/dev/null 2>&1 \
+    || hyprctl dispatch focuswindow "address:$addr" >/dev/null 2>&1 \
+    || true
+  thunderbird -calendar >/dev/null 2>&1 || true
+else
+  thunderbird -calendar >/dev/null 2>&1 &
+fi

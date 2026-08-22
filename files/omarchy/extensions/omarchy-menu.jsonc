@@ -1,0 +1,23 @@
+{
+  // Extend the Quickshell Omarchy menu with JSONC.
+  //
+  // IDs are object keys. The parent is inferred from the dotted id, so
+  // "personal.notes" appears under "personal", and "personal" appears on the
+  // root menu. Reuse an existing id to override/extend it.
+  //
+  // Fields:
+  //   icon        Nerd Font glyph shown in the icon column.
+  //   label       Visible row title.
+  //   action      Shell command to run. If omitted, the row is a submenu.
+  //   target      Existing submenu id to open. Use for links/aliases.
+  //   provider    Runtime provider function/command returning JSON rows.
+  //   aliases     alternate `omarchy menu summon <name>` routes; also searchable.
+  //   description Optional subtitle and extra search text.
+  //   when        Shell condition; hide row when it fails.
+  //   checked     Shell condition; append ✓ when it succeeds.
+
+  "trigger.ha": {"icon":"󰟐","label":"HA","description":"Home Assistant Licht"},
+  "trigger.ha.licht": {"icon":"󰌵","label":"Licht","description":"Wohnzimmer, Leselicht, Schrank, Flur, H6022, Sofatisch an","action":"ha-licht licht"},
+  "trigger.ha.leselicht": {"icon":"󰂺","label":"Leselicht","description":"Leselicht umschalten","action":"ha-licht leselicht"},
+  "trigger.ha.abdunkeln": {"icon":"󰹏","label":"Abdunkeln","description":"Wohnzimmer und Leselicht aus","action":"ha-licht abdunkeln"},
+}
