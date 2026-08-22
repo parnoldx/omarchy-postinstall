@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "pa.clock",
   "name": "My Clock",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "Omarchy",
   "description": "Date/time label with a calendar popup of Thunderbird events",
   "kinds": [

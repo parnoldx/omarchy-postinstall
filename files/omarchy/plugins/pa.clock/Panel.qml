@@ -98,6 +98,20 @@ Panel {
     if (root.bar && root.bar.run) root.bar.run(root.focusThunderbirdScript)
   }
 
+  // Qt.openUrlExternally rather than the shell helper on purpose. That helper
+  // runs `bash -lc`, and a meeting link is supplied by whoever sent the
+  // invitation, so putting it through a shell would be a command injection.
+  // Model.safeUrl also refuses anything that is not plain https.
+  function openExternally(url) {
+    if (!url) return
+    Qt.openUrlExternally(url)
+    root.close()
+  }
+
+  function openMeeting(event) {
+    root.openExternally(Model.meetingUrlFor(event))
+  }
+
   function formatSelectedHeroLabel() {
     return Qt.formatDate(root.selectedDate, "MMMM d")
   }
@@ -847,6 +861,7 @@ Panel {
           }
 
           Column {
+            visible: root.selectedEvents.length > 0 || !root.eventDoc
             width: gridColumn.width
             anchors.horizontalCenter: parent.horizontalCenter
             spacing: Style.space(6)
@@ -862,9 +877,17 @@ Panel {
               model: root.selectedEvents
 
               Item {
+                id: eventRow
                 required property var modelData
+                readonly property string meetingUrl: Model.meetingUrlFor(modelData)
+                readonly property bool joinable: meetingUrl !== ""
+                readonly property int joinReserve: joinable ? joinButton.width + Style.space(8) : 0
+
                 width: gridColumn.width
-                height: eventTitle.implicitHeight + eventMeta.implicitHeight + Style.space(8)
+                height: Math.max(
+                  eventTitle.implicitHeight + eventMeta.implicitHeight + Style.space(8),
+                  joinable ? joinButton.height + Style.space(4) : 0
+                )
 
                 Rectangle {
                   width: Style.space(3)
@@ -877,7 +900,7 @@ Panel {
                 Text {
                   id: eventTitle
                   x: Style.space(10)
-                  width: parent.width - Style.space(12)
+                  width: parent.width - Style.space(12) - eventRow.joinReserve
                   text: modelData.title || ""
                   color: root.contentForeground
                   font.family: root.contentFontFamily
@@ -889,10 +912,11 @@ Panel {
                   id: eventMeta
                   x: Style.space(10)
                   y: eventTitle.implicitHeight + Style.space(2)
-                  width: parent.width - Style.space(12)
+                  width: parent.width - Style.space(12) - eventRow.joinReserve
                   text: {
                     var time = Model.eventDisplayTime(modelData)
                     var loc = modelData.location || ""
+                    if (eventRow.meetingUrl && loc.indexOf(eventRow.meetingUrl) !== -1) loc = ""
                     if (time && loc) return time + "  ·  " + loc
                     return time || loc
                   }
@@ -904,15 +928,52 @@ Panel {
 
                 MouseArea {
                   anchors.fill: parent
+                  anchors.rightMargin: eventRow.joinReserve
                   cursorShape: Qt.PointingHandCursor
                   onClicked: root.openThunderbirdCalendar()
+                }
+
+                Rectangle {
+                  id: joinButton
+                  visible: eventRow.joinable
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: joinLabel.implicitWidth + Style.space(8)
+                  height: joinLabel.implicitHeight + Style.space(3)
+                  radius: height / 2
+                  color: joinMouse.containsMouse
+                    ? Style.selectedStateColor(root.contentForeground, Color.accent)
+                    : "transparent"
+                  border.width: Style.spacing.hairline
+                  border.color: joinMouse.containsMouse
+                    ? "transparent"
+                    : Qt.darker(root.contentForeground, 2.0)
+
+                  Text {
+                    id: joinLabel
+                    anchors.centerIn: parent
+                    text: "Join"
+                    color: joinMouse.containsMouse
+                      ? Color.background
+                      : Qt.darker(root.contentForeground, 1.4)
+                    font.family: root.contentFontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  MouseArea {
+                    id: joinMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.openMeeting(eventRow.modelData)
+                  }
                 }
               }
             }
 
             Text {
-              visible: root.selectedEvents.length === 0
-              text: root.eventDoc ? "No events" : "Waiting for Thunderbird calendar"
+              visible: !root.eventDoc
+              text: "Waiting for Thunderbird calendar"
               color: Qt.darker(root.contentForeground, 1.8)
               font.family: root.contentFontFamily
               font.pixelSize: Style.font.bodySmall

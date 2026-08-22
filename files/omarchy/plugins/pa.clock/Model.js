@@ -398,6 +398,19 @@ function eventDisplayTime(event) {
   return (h < 10 ? "0" : "") + h + ":" + (m < 10 ? "0" : "") + m
 }
 
+// Only https is ever launched. A meeting link is supplied by whoever sent
+// the invitation, so treating it as trusted input would be a mistake.
+function safeUrl(url) {
+  var text = String(url || "").trim()
+  if (text.indexOf("https://") !== 0) return ""
+  if (/[\s"'<>]/.test(text)) return ""
+  return text
+}
+
+function meetingUrlFor(event) {
+  return event ? safeUrl(event.meetingUrl) : ""
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     dateKey: dateKey,
@@ -434,6 +447,8 @@ if (typeof module !== "undefined") {
     announceLabel: announceLabel,
     millisUntil: millisUntil,
     shouldAnnounce: shouldAnnounce,
-    eventDisplayTime: eventDisplayTime
+    eventDisplayTime: eventDisplayTime,
+    safeUrl: safeUrl,
+    meetingUrlFor: meetingUrlFor
   }
 }

@@ -438,6 +438,24 @@ def date_key(d: date) -> str:
     return f"{d.year:04d}-{d.month:02d}-{d.day:02d}"
 
 
+MEETING_HOST = re.compile(
+    r"meet\.|zoom\.|teams\.|jitsi|whereby|webex|gotomeeting|skype\.|discord\.gg",
+    re.I,
+)
+HTTPS_URL = re.compile(r"https://[^\s<>\"']+")
+
+
+def first_meeting_url(*texts: str) -> str:
+    for text in texts:
+        if not text:
+            continue
+        for found in HTTPS_URL.finditer(text):
+            url = found.group(0).rstrip(").,;")
+            if MEETING_HOST.search(url):
+                return url
+    return ""
+
+
 def extract_calendar_data(xml_text: str) -> list[str]:
     payloads = []
     try:
@@ -489,13 +507,11 @@ def events_from_vevent(block: str, calendar: dict, default_tz: ZoneInfo, window_
     rrule = fields.get("RRULE", [({}, "")])[0][1].strip()
     description = unescape_ics(fields.get("DESCRIPTION", [({}, "")])[0][1])
     url = unescape_ics(fields.get("URL", [({}, "")])[0][1]).strip()
+    google_conf = unescape_ics(fields.get("X-GOOGLE-CONFERENCE", [({}, "")])[0][1]).strip()
+    conference = unescape_ics(fields.get("CONFERENCE", [({}, "")])[0][1]).strip()
+    skype_url = unescape_ics(fields.get("X-MICROSOFT-SKYPETEAMSMEETINGURL", [({}, "")])[0][1]).strip()
 
-    meeting = ""
-    for candidate in (url, location, description):
-        found = re.search(r"https://[^\s<>\"]+", candidate or "")
-        if found and re.search(r"meet\.|zoom\.|teams\.|jitsi|whereby", found.group(0), re.I):
-            meeting = found.group(0).rstrip(").,;")
-            break
+    meeting = first_meeting_url(google_conf, conference, skype_url, url, location, description)
 
     occurrences = expand_rrule(start, rrule, window_start, window_end) if rrule else [start]
     events = []
