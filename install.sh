@@ -4,7 +4,7 @@
 # Usage:
 #   ./install.sh
 #   ./install.sh --yes
-#   HA_URL=http://homeassistant.local:8123 HA_TOKEN=... ./install.sh --yes
+#   HA_URL=http://homeassistant.local:8123 HA_TOKEN=... SHELLY_AUTH_KEY=... ./install.sh --yes
 #
 # Copies this tree onto ~/.config and ~/.local, installs packages, then
 # reloads Hyprland / the Omarchy shell. Existing files are backed up first.
@@ -12,8 +12,8 @@
 # Included: Hyprland overlays, NeoQwertz keymap, bar plugins, Handy (NVIDIA
 # ICD + GPU keepalive so dictation does not stall ~60s after RTD3), Home
 # Assistant menu + weather, screensaver/about branding, Plymouth/SDDM Om
-# unlock logo, default agent pi, Grok usage + Thunderbird calendar
-# automation, extra packages.
+# unlock logo, default agent pi, VS Code as editor (Omarchy + Files MIME),
+# Grok usage + Thunderbird calendar automation, extra packages.
 
 set -euo pipefail
 
@@ -44,6 +44,9 @@ Home Assistant credentials (optional, prompted if missing):
 
 Weather (optional, prompted if missing):
   WEATHER_PLZ  German 5-digit postal code; resolved to a wetter.de location id
+
+Shelly door opener (optional, prompted if missing):
+  SHELLY_AUTH_KEY  cloud auth_key for ha-tuer
 EOF
 }
 
@@ -150,6 +153,7 @@ desktop:
   Branding    screensaver + about
   Plymouth    black/white Om on LUKS unlock and SDDM (sudo, initramfs rebuild)
   Agent       pi (mise global, no agent launch)
+  Editor      VS Code (omarchy-launch-editor + Files / xdg-open)
   Automation  Grok usage collector + Thunderbird calendar sync
   Packages    ${REPO_PACKAGES[*]}
               AUR: ${AUR_PACKAGES[*]}
@@ -237,6 +241,7 @@ fi
 log "Installing helper scripts"
 mkdir -p "$HOME/.local/bin"
 install_file "$FILES/bin/ha-licht" "$HOME/.local/bin/ha-licht" 755
+install_file "$FILES/bin/ha-tuer" "$HOME/.local/bin/ha-tuer" 755
 install_file "$FILES/bin/handy-toggle" "$HOME/.local/bin/handy-toggle" 755
 install_file "$FILES/bin/handy-daemon" "$HOME/.local/bin/handy-daemon" 755
 install_file "$FILES/bin/handy-gpu-keepalive" "$HOME/.local/bin/handy-gpu-keepalive" 755
@@ -244,6 +249,7 @@ install_file "$FILES/bin/handy-ensure-settings" "$HOME/.local/bin/handy-ensure-s
 install_file "$FILES/bin/transcribe" "$HOME/.local/bin/transcribe" 755
 install_file "$FILES/bin/omarchy-agent-usage-grok" "$HOME/.local/bin/omarchy-agent-usage-grok" 755
 install_file "$FILES/bin/wetter-plz-lookup" "$HOME/.local/bin/wetter-plz-lookup" 755
+install_file "$FILES/bin/set-code-mime-defaults" "$HOME/.local/bin/set-code-mime-defaults" 755
 
 # --- home assistant ----------------------------------------------------------
 
@@ -280,6 +286,35 @@ if [[ -n $ha_url && -n $ha_token ]]; then
   log "Wrote $ha_url_file"
 else
   warn "Skipped HA credentials; pa.weather room/dusk and ha-licht will not work yet"
+fi
+
+# --- shelly door opener ------------------------------------------------------
+
+log "Shelly door opener credentials"
+shelly_dir="$HOME/.config/shelly"
+shelly_auth_file="$shelly_dir/auth_key"
+shelly_auth="${SHELLY_AUTH_KEY:-}"
+
+if [[ -z $shelly_auth && -r $shelly_auth_file ]]; then
+  shelly_auth="$(<"$shelly_auth_file")"
+fi
+
+if [[ -z $shelly_auth ]]; then
+  if [[ -t 0 ]]; then
+    printf '\nShelly Cloud auth_key (used by Super-menu HA → Tür öffnen).\n'
+    shelly_auth="$(ask_secret "Shelly auth_key")"
+  else
+    warn "No Shelly credentials (set SHELLY_AUTH_KEY, or re-run interactively)"
+  fi
+fi
+
+if [[ -n $shelly_auth ]]; then
+  mkdir -p "$shelly_dir"
+  trim <<<"$shelly_auth" >"$shelly_auth_file"
+  chmod 600 "$shelly_auth_file"
+  log "Wrote $shelly_auth_file"
+else
+  warn "Skipped Shelly credentials; ha-tuer will not work yet"
 fi
 
 # --- weather PLZ -------------------------------------------------------------
@@ -352,6 +387,20 @@ if command -v systemctl >/dev/null; then
     warn "Grok usage collector failed (run grok login later)"
   systemctl --user start omarchy-thunderbird-calendar-sync.service ||
     warn "Thunderbird calendar sync failed (needs a configured Thunderbird profile)"
+fi
+
+# --- default editor ----------------------------------------------------------
+
+log "Setting default editor to VS Code"
+mkdir -p "$HOME/.local/state/omarchy/defaults"
+printf 'code\n' >"$HOME/.local/state/omarchy/defaults/editor"
+if command -v omarchy >/dev/null; then
+  omarchy default editor code >/dev/null || warn "Could not run omarchy default editor code"
+fi
+if [[ -x $HOME/.local/bin/set-code-mime-defaults ]]; then
+  "$HOME/.local/bin/set-code-mime-defaults" || warn "Could not set Files MIME defaults to VS Code"
+else
+  warn "set-code-mime-defaults missing; Files may still open nvim"
 fi
 
 # --- default agent -----------------------------------------------------------

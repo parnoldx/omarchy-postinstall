@@ -1,7 +1,7 @@
 # omarchy-postinstall
 
-Personal Omarchy post-install. Run it on a fresh box to apply Hyprland overlays, bar plugins, Handy (NVIDIA-only Vulkan + a CUDA keepalive so dictation does not stall ~60s after the laptop dGPU hits D3cold), Home Assistant helpers, branding, Plymouth/SDDM Om unlock, default agent `pi`, and extra packages.
-Home Assistant credentials and a German PLZ are prompted (or passed as env vars) and written only on the target machine — nothing location-specific is stored in this repo. The weather popup shows a rain radar only while rain is falling here or forecast today.
+Personal Omarchy post-install. Run it on a fresh box to apply Hyprland overlays, bar plugins, Handy (NVIDIA-only Vulkan + a CUDA keepalive so dictation does not stall ~60s after the laptop dGPU hits D3cold), Home Assistant helpers, branding, Plymouth/SDDM Om unlock, default agent `pi`, VS Code as the editor (Omarchy launcher and Files), and extra packages.
+Home Assistant credentials, the Shelly door-opener auth key, and a German PLZ are prompted (or passed as env vars) and written only on the target machine — nothing location-specific is stored in this repo. The weather popup shows a rain radar only while rain is falling here or forecast today.
 
 ## New Omarchy box
 
@@ -16,10 +16,12 @@ Non-interactive, with secrets already in the environment:
 
 ```bash
 git clone https://github.com/parnoldx/omarchy-postinstall.git ~/work/omarchy-postinstall
-HA_URL=http://homeassistant.local:8123 HA_TOKEN=... WEATHER_PLZ=12345 \
+HA_URL=http://homeassistant.local:8123 HA_TOKEN=... SHELLY_AUTH_KEY=... WEATHER_PLZ=12345 \
   ~/work/omarchy-postinstall/install.sh --yes
 ```
 
 `--skip-packages` skips pacman/AUR. `--skip-aur` installs official repos only. `--skip-plymouth` copies the Om logo but does not rebuild the initramfs.
 
 After install, sign into Thunderbird (calendar popup) and run `grok login` (agents usage). Right-click on the weather pill opens the wetter.de forecast resolved from `WEATHER_PLZ`. The weather popup adds a RainViewer map when precipitation is current or forecast today.
+
+`omarchy default editor` only covers Omarchy launchers (`$EDITOR`, keybindings). Files / `xdg-open` still follow MIME, which Omarchy ships as Neovim. The post-install sets both: `omarchy default editor code` and `~/.config/mimeapps.list` for text/source types. Re-apply MIME later with `set-code-mime-defaults`.
