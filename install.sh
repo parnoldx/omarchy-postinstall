@@ -9,7 +9,8 @@
 # Copies this tree onto ~/.config and ~/.local, installs packages, then
 # reloads Hyprland / the Omarchy shell. Existing files are backed up first.
 #
-# Included: Hyprland overlays, NeoQwertz keymap, bar plugins, Handy, Home
+# Included: Hyprland overlays, NeoQwertz keymap, bar plugins, Handy (NVIDIA
+# ICD + GPU keepalive so dictation does not stall ~60s after RTD3), Home
 # Assistant menu + weather, screensaver/about branding, Plymouth/SDDM Om
 # unlock logo, default agent pi, Grok usage + Thunderbird calendar
 # automation, extra packages.
@@ -140,7 +141,8 @@ This will customize the current Omarchy user ($USER) to match the existing
 desktop:
 
   Hyprland    scale 1.25, gaps 2/4, rounding 4, NeoQwertz keymap,
-              Thunderbird/Herdr overlays, Handy, Super+J layout toggle
+              Thunderbird/Herdr overlays, Handy (NVIDIA ICD + dGPU keepalive),
+              Super+J layout toggle
   Bar         transparent; pa.menu / pa.clock / pa.weather / pa.tray / Handy
   HA          launcher Licht/Leselicht/Abdunkeln + room temp / dusk
   Weather     asks for a German PLZ, stores the wetter.de location URL locally;
@@ -236,6 +238,9 @@ log "Installing helper scripts"
 mkdir -p "$HOME/.local/bin"
 install_file "$FILES/bin/ha-licht" "$HOME/.local/bin/ha-licht" 755
 install_file "$FILES/bin/handy-toggle" "$HOME/.local/bin/handy-toggle" 755
+install_file "$FILES/bin/handy-daemon" "$HOME/.local/bin/handy-daemon" 755
+install_file "$FILES/bin/handy-gpu-keepalive" "$HOME/.local/bin/handy-gpu-keepalive" 755
+install_file "$FILES/bin/handy-ensure-settings" "$HOME/.local/bin/handy-ensure-settings" 755
 install_file "$FILES/bin/transcribe" "$HOME/.local/bin/transcribe" 755
 install_file "$FILES/bin/omarchy-agent-usage-grok" "$HOME/.local/bin/omarchy-agent-usage-grok" 755
 install_file "$FILES/bin/wetter-plz-lookup" "$HOME/.local/bin/wetter-plz-lookup" 755
@@ -337,9 +342,12 @@ run omarchy hook install post-boot "$FILES/omarchy/hooks/post-boot.d/thunderbird
 install_tree "$FILES/systemd/user" "$HOME/.config/systemd/user"
 if command -v systemctl >/dev/null; then
   systemctl --user daemon-reload
-  for unit in omarchy-agent-usage-grok.timer omarchy-agent-usage-grok.path omarchy-thunderbird-calendar-sync.timer; do
+  for unit in omarchy-agent-usage-grok.timer omarchy-agent-usage-grok.path omarchy-thunderbird-calendar-sync.timer handy-gpu-keepalive.service; do
     systemctl --user enable --now "$unit" || warn "could not enable $unit"
   done
+  if [[ -x $HOME/.local/bin/handy-ensure-settings ]]; then
+    "$HOME/.local/bin/handy-ensure-settings" || warn "could not set Handy never-unload"
+  fi
   systemctl --user start omarchy-agent-usage-grok.service ||
     warn "Grok usage collector failed (run grok login later)"
   systemctl --user start omarchy-thunderbird-calendar-sync.service ||
@@ -380,6 +388,7 @@ if command -v omarchy-shell >/dev/null; then
 fi
 
 log "Done. Open a new session or wait for the shell to hot-reload."
-log "Handy dictation: Ctrl+F1. File transcription: transcribe file.mp4 [-o out.txt]."
+log "Handy dictation: Ctrl+F1 (NVIDIA ICD + dGPU keepalive; model never unloads)."
+log "File transcription: transcribe file.mp4 [-o out.txt]."
 log "Thunderbird overlay: Super+Shift+E. Herdr: Super+Shift+A."
 log "Grok usage in the agents panel needs: grok login"

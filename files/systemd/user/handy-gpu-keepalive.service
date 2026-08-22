@@ -1,0 +1,14 @@
+[Unit]
+Description=Keep NVIDIA GPU awake for Handy dictation
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/handy-gpu-keepalive
+Restart=on-failure
+RestartSec=2
+StartLimitBurst=3
+StartLimitIntervalSec=60
+
+[Install]
+WantedBy=default.target

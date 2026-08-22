@@ -18,10 +18,14 @@ while read -r pid; do
 done < <(pgrep -xo handy || true)
 
 if [[ -z $daemon ]]; then
-  if command -v uwsm-app >/dev/null 2>&1; then
-    exec uwsm-app -- handy --start-hidden
+  cmd=(handy --start-hidden)
+  if [[ -x ${HOME}/.local/bin/handy-daemon ]]; then
+    cmd=("${HOME}/.local/bin/handy-daemon")
   fi
-  exec handy --start-hidden
+  if command -v uwsm-app >/dev/null 2>&1; then
+    exec uwsm-app -- "${cmd[@]}"
+  fi
+  exec "${cmd[@]}"
 fi
 
 kill -USR2 "$daemon"

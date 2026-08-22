@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""Hold a CUDA context so the NVIDIA dGPU stays in D0.
+
+Handy’s Vulkan device can take ~60s to recover after fine-grained RTD3
+(D3cold). Keeping an idle CUDA context open prevents that power-down
+while Handy is in use.
+"""
+
+from __future__ import annotations
+
+import ctypes
+import signal
+import sys
+import time
+
+_stop = False
+
+
+def _handle(signum: int, _frame: object) -> None:
+    global _stop
+    _stop = True
+
+
+def main() -> int:
+    signal.signal(signal.SIGTERM, _handle)
+    signal.signal(signal.SIGINT, _handle)
+
+    try:
+        lib = ctypes.CDLL("libcuda.so.1")
+    except OSError as exc:
+        print(f"handy-gpu-keepalive: cannot load libcuda: {exc}", file=sys.stderr)
+        return 1
+
+    lib.cuInit.argtypes = [ctypes.c_uint]
+    lib.cuInit.restype = ctypes.c_int
+    lib.cuDeviceGet.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_int]
+    lib.cuDeviceGet.restype = ctypes.c_int
+    lib.cuCtxCreate_v2.argtypes = [
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_uint,
+        ctypes.c_int,
+    ]
+    lib.cuCtxCreate_v2.restype = ctypes.c_int
+
+    err = lib.cuInit(0)
+    if err != 0:
+        print(f"handy-gpu-keepalive: cuInit failed: {err}", file=sys.stderr)
+        return 1
+
+    dev = ctypes.c_int()
+    err = lib.cuDeviceGet(ctypes.byref(dev), 0)
+    if err != 0:
+        print(f"handy-gpu-keepalive: cuDeviceGet failed: {err}", file=sys.stderr)
+        return 1
+
+    ctx = ctypes.c_void_p()
+    err = lib.cuCtxCreate_v2(ctypes.byref(ctx), 0, dev)
+    if err != 0:
+        print(f"handy-gpu-keepalive: cuCtxCreate failed: {err}", file=sys.stderr)
+        return 1
+
+    while not _stop:
+        time.sleep(1)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

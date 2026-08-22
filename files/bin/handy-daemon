@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Launch Handy with the NVIDIA Vulkan ICD only, after waking the dGPU.
+#
+# Dual-GPU (Intel + NVIDIA) lets ggml-vulkan's device go stale across D3cold
+# and can take ~60s to recover on the next model load. Pinning the ICD and
+# holding a CUDA context keeps that reload in the 0.3–2s range.
+set -euo pipefail
+
+NVIDIA_ICD=/usr/share/vulkan/icd.d/nvidia_icd.json
+KEEPALIVE_UNIT=handy-gpu-keepalive.service
+ENSURE="${HOME}/.local/bin/handy-ensure-settings"
+
+if [[ -x $ENSURE ]]; then
+  "$ENSURE" || true
+fi
+
+if [[ -f $NVIDIA_ICD ]]; then
+  export VK_ICD_FILENAMES=$NVIDIA_ICD
+  export VK_DRIVER_FILES=$NVIDIA_ICD
+fi
+
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl --user start "$KEEPALIVE_UNIT" >/dev/null 2>&1 || true
+fi
+
+gpu_power=""
+for vendor in /sys/bus/pci/devices/*/vendor; do
+  [[ -r $vendor ]] || continue
+  [[ $(<"$vendor") == 0x10de ]] || continue
+  class="${vendor%/vendor}/class"
+  [[ -r $class ]] || continue
+  case $(<"$class") in
+    0x030000 | 0x030200)
+      gpu_power="${vendor%/vendor}/power/runtime_status"
+      break
+      ;;
+  esac
+done
+
+if [[ -n $gpu_power ]]; then
+  for _ in 1 2 3 4 5 6 7 8; do
+    if [[ -r $gpu_power && $(<"$gpu_power") == active ]]; then
+      break
+    fi
+    sleep 0.25
+  done
+fi
+
+exec /usr/bin/handy --start-hidden "$@"
