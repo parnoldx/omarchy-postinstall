@@ -146,7 +146,7 @@ desktop:
   Hyprland    scale 1.25, gaps 2/4, rounding 4, NeoQwertz keymap,
               Thunderbird/Herdr overlays, Handy (NVIDIA ICD + dGPU keepalive),
               Super+J layout toggle
-  Bar         transparent; pa.menu / pa.clock / pa.weather / pa.tray / Handy
+  Bar         transparent; pa.menu / pa.clock / pa.weather / pa.tray / pa.agents / Handy
   HA          launcher Licht/Leselicht/Abdunkeln + room temp / dusk
   Weather     asks for a German PLZ, stores the wetter.de location URL locally;
               popup shows rain radar only while rain is falling or forecast today

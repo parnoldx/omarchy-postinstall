@@ -1,6 +1,6 @@
 # omarchy-postinstall
 
-Personal Omarchy post-install. Run it on a fresh box to apply Hyprland overlays, bar plugins, Handy (NVIDIA-only Vulkan + a CUDA keepalive so dictation does not stall ~60s after the laptop dGPU hits D3cold), Home Assistant helpers, branding, Plymouth/SDDM Om unlock, default agent `pi`, VS Code as the editor (Omarchy launcher and Files), and extra packages.
+Personal Omarchy post-install. Run it on a fresh box to apply Hyprland overlays, bar plugins (including `pa.agents`, a stacked-sections fork of the stock agents panel), Handy (NVIDIA-only Vulkan + a CUDA keepalive so dictation does not stall ~60s after the laptop dGPU hits D3cold), Home Assistant helpers, branding, Plymouth/SDDM Om unlock, default agent `pi`, VS Code as the editor (Omarchy launcher and Files), and extra packages.
 Home Assistant credentials, the Shelly door-opener auth key, and a German PLZ are prompted (or passed as env vars) and written only on the target machine — nothing location-specific is stored in this repo. The weather popup shows a rain radar only while rain is falling here or forecast today.
 
 ## New Omarchy box
