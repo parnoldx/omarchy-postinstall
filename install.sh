@@ -15,10 +15,23 @@
 # unlock logo, default agent pi, VS Code as editor (Omarchy + Files MIME),
 # Grok usage + Thunderbird calendar automation, extra packages.
 #
+# CAD Assistant is made usable here twice over: its bundled 2021 Qt5 breaks
+# under Wayland (QT_QPA_PLATFORM=xcb wrapper), and the AppImage's desktop
+# file ships Exec=CADAssistant, which only resolves inside the container.
+#
 # The clock's New Event add-on is built here but installed by hand: it is
 # unsigned, and Thunderbird has no CLI for installing add-ons.
 
 set -euo pipefail
+
+# Root steps (/usr/local/bin wrapper, desktop file fix, Plymouth/SDDM) all use
+# plain sudo, so one upfront `sudo -v` covers them. A background loop refreshes
+# the timestamp while the script runs; killed on exit.
+SUDO_KEEPALIVE_PID=""
+cleanup() {
+  [[ -n $SUDO_KEEPALIVE_PID ]] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
+}
+trap cleanup EXIT
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FILES="$ROOT/files"
@@ -30,7 +43,7 @@ SKIP_PLYMOUTH=0
 
 # zip only for packing the clock's Thunderbird add-on into an .xpi.
 REPO_PACKAGES=(thunderbird bitwarden bitwarden-cli git-lfs libqalculate zip)
-AUR_PACKAGES=(handy-bin microsoft-edge-stable-bin visual-studio-code-bin)
+AUR_PACKAGES=(cadassistant-appimage handy-bin microsoft-edge-stable-bin visual-studio-code-bin)
 
 usage() {
   cat <<'EOF'
@@ -39,7 +52,7 @@ Usage: install.sh [options]
   --yes              Do not ask for confirmation
   --skip-packages    Skip pacman and AUR installs
   --skip-aur         Install official packages only
-  --skip-plymouth    Skip LUKS unlock / SDDM Om logo (needs sudo)
+  --skip-plymouth    Skip LUKS unlock / SDDM Om logo
   -h, --help         Show this help
 
 Home Assistant credentials (optional, prompted if missing):
@@ -143,6 +156,16 @@ done
 [[ -d $FILES ]] || die "missing $FILES (run this from the omarchy-setup tree)"
 command -v omarchy >/dev/null || die "omarchy is not on PATH; this script is for an Omarchy install"
 
+log "Asking for sudo once (wrapper install, desktop file fix, Plymouth); no further prompts"
+sudo -v || die "sudo privileges are required"
+(
+  while :; do
+    sleep 60
+    sudo -v || exit
+  done
+) &
+SUDO_KEEPALIVE_PID=$!
+
 cat <<EOF
 This will customize the current Omarchy user ($USER) to match the existing
 desktop:
@@ -153,7 +176,9 @@ desktop:
   Bar         transparent; pa.menu / pa.clock / pa.weather / pa.tray / pa.agents / Handy
   Clock       month grid dotted in Thunderbird's own calendar colours;
               right-click a day for Thunderbird's New Event dialog (add-on
-              packed to .xpi here, installed by hand in Thunderbird)
+              packed to .xpi here, installed by hand in Thunderbird);
+              plays one nudge sound when a joinable meeting runs a minute
+              without anyone clicking Join
   HA          launcher Licht/Leselicht/Abdunkeln + room temp / dusk
   Weather     asks for a German PLZ, stores the wetter.de location URL locally;
               popup shows rain radar only while rain is falling or forecast today
@@ -183,6 +208,23 @@ if (( SKIP_PACKAGES == 0 )); then
     else
       warn "AUR is not reachable; skipped ${AUR_PACKAGES[*]}"
       warn "Re-run later: omarchy pkg aur add ${AUR_PACKAGES[*]}"
+    fi
+
+    # CAD Assistant's bundled Qt5 crashes under Wayland and its desktop file
+    # points at Exec=CADAssistant, which only exists inside the AppImage
+    # sandbox. The wrapper in /usr/local/bin fixes terminal use (it shadows
+    # /usr/bin without touching pacman's symlink); the Exec rewrite makes the
+    # launcher entry work with the same env vars.
+    cad_desktop=/usr/share/applications/cadassistant.desktop
+    if pacman -Q cadassistant-appimage &>/dev/null; then
+      log "Installing CAD Assistant xcb wrapper"
+      run sudo install -Dm755 "$FILES/bin/cadassistant" /usr/local/bin/cadassistant
+      if ! grep -q 'QT_QPA_PLATFORM=xcb' "$cad_desktop" 2>/dev/null; then
+        log "Fixing CAD Assistant desktop file"
+        run sudo sed -i \
+          's|^Exec=.*|Exec=env DESKTOPINTEGRATION=false QT_QPA_PLATFORM=xcb /usr/bin/cadassistant %U|' \
+          "$cad_desktop"
+      fi
     fi
   fi
 else

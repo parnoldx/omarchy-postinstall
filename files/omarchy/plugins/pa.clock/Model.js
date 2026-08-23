@@ -471,6 +471,26 @@ function shouldAnnounce(event, nowMs, leadMinutes, startedLeadMinutes) {
   return delta <= lead * MINUTE_MS
 }
 
+// A join button left unclicked: the meeting is running, it still has a
+// Join link, and between graceMs and windowMs has passed since it started
+// without one. Past the window the meeting counts as deliberately skipped,
+// not forgotten -- and a shell restarted hours into it stays quiet instead
+// of punishing the restart. Fires on every tick while true; the widget
+// supplies the once-per-occurrence memory so the sound plays a single time.
+function shouldNudge(event, nowMs, graceMs, windowMs) {
+  if (!event) return false
+  if (meetingUrlFor(event) === "") return false
+  if (!isInProgress(event, nowMs)) return false
+  var start = eventStartMs(event)
+  if (isNaN(start)) return false
+  var grace = Number(graceMs)
+  if (!isFinite(grace) || grace < 0) grace = MINUTE_MS
+  var window = Number(windowMs)
+  if (!isFinite(window) || window < grace) window = 5 * MINUTE_MS
+  var late = nowMs - start
+  return late >= grace && late <= window
+}
+
 function occurrenceKey(event) {
   if (!event) return ""
   var id = String(event.id || "")
@@ -589,6 +609,7 @@ if (typeof module !== "undefined") {
     announceLabel: announceLabel,
     millisUntil: millisUntil,
     shouldAnnounce: shouldAnnounce,
+    shouldNudge: shouldNudge,
     occurrenceKey: occurrenceKey,
     isDismissed: isDismissed,
     joinTooltip: joinTooltip,

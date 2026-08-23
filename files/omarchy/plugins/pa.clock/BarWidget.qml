@@ -158,10 +158,36 @@ BarWidget {
   onBarChanged: injectPanel()
   onSettingsChanged: injectPanel()
 
+  // A join button nobody clicked: between one and five minutes into a
+  // meeting whose Join link is still unclicked (dismissReminder, which only
+  // Panel.openMeeting calls), play one sound. nudgedKey keeps that single
+  // sound single — every later tick sees nudgeDue still true.
+  readonly property bool nudgeDue: Model.shouldNudge(upcomingEvent, nowMs)
+    && !Model.isDismissed(upcomingEvent, dismissedKey)
+  property string nudgedKey: ""
+
+  function maybeNudge() {
+    if (!nudgeDue) return
+    var key = Model.occurrenceKey(upcomingEvent)
+    if (!key || key === nudgedKey) return
+    nudgedKey = key
+    nudgeSound.running = true
+  }
+
+  // paplay rather than anything Qt owns, so the sound follows the default
+  // PipeWire sink and its volume like every other desktop sound.
+  Process {
+    id: nudgeSound
+    command: ["paplay", "/usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga"]
+  }
+
   SystemClock {
     id: clock
     precision: SystemClock.Seconds
-    onDateChanged: root.displayDate = date
+    onDateChanged: {
+      root.displayDate = date
+      root.maybeNudge()
+    }
   }
 
   Loader {

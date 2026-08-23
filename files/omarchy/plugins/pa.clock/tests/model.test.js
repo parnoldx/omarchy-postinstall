@@ -54,6 +54,26 @@ test("shouldAnnounce covers the lead window and only the first minutes after sta
   assert.equal(Model.shouldAnnounce(upcoming, now, 0), false)
 })
 
+test("shouldNudge waits out the first minute and gives up after five", () => {
+  const current = event({ id: "current", start: "2026-08-23T10:00:00+02:00", end: "2026-08-23T10:25:00+02:00" })
+  assert.equal(Model.shouldNudge(current, Date.parse("2026-08-23T10:00:59+02:00")), false)
+  assert.equal(Model.shouldNudge(current, Date.parse("2026-08-23T10:01:00+02:00")), true)
+  assert.equal(Model.shouldNudge(current, Date.parse("2026-08-23T10:05:00+02:00")), true)
+  assert.equal(Model.shouldNudge(current, Date.parse("2026-08-23T10:05:01+02:00")), false)
+  assert.equal(Model.shouldNudge(current, now, 10 * MINUTE), false) // grace past the window
+})
+
+test("shouldNudge needs a join link and a meeting that is actually running", () => {
+  assert.equal(Model.shouldNudge(event({ meetingUrl: "" }), now), false)
+  assert.equal(Model.shouldNudge(event({ allDay: true, start: "2026-08-23", end: "2026-08-24" }), now), false)
+  assert.equal(Model.shouldNudge(event(), now), false) // not started yet
+  assert.equal(
+    Model.shouldNudge(event({ start: "2026-08-23T09:00:00+02:00", end: "2026-08-23T09:30:00+02:00" }), now),
+    false
+  ) // already over
+  assert.equal(Model.shouldNudge(null, now), false)
+})
+
 test("isDismissed matches one occurrence and then stays quiet", () => {
   const upcoming = event()
   const key = Model.occurrenceKey(upcoming)
