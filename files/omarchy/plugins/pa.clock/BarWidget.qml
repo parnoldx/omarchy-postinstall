@@ -213,6 +213,12 @@ BarWidget {
     function hide(): void { root.close() }
     function toggle(): void { root.togglePanel() }
     function join(): void { root.joinUpcoming() }
+    function entry(): void {
+      root.open()
+      Qt.callLater(function() {
+        if (panelLoader.item && panelLoader.item.openEntry) panelLoader.item.openEntry("")
+      })
+    }
   }
 
   IpcHandler {

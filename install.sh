@@ -179,10 +179,13 @@ desktop:
               Super+J layout toggle
   Bar         transparent; pa.menu / pa.clock / pa.weather / pa.tray / pa.agents / Handy
   Clock       month grid dotted in Thunderbird's own calendar colours;
-              right-click a day for Thunderbird's New Event dialog (add-on
-              packed to .xpi here, installed by hand in Thunderbird);
-              plays one nudge sound when a joinable meeting runs a minute
-              without anyone clicking Join
+              right-click a day for the entry pane — type the event in
+              English or German ("lunch with Ana 12:30 till 14:00"), the
+              phrase paints itself as it parses, Create writes the event or
+              task into Thunderbird without taking focus (add-on packed to
+              .xpi here, installed by hand in Thunderbird); plays one nudge
+              sound when a joinable meeting runs a minute without anyone
+              clicking Join
   HA          launcher Licht/Leselicht/Abdunkeln + room temp / dusk
   Weather     asks for a German PLZ, stores the wetter.de location URL locally;
               popup shows rain radar only while rain is falling or forecast today
@@ -262,14 +265,18 @@ chmod 755 \
   "$HOME/.config/omarchy/plugins/pa.clock/sync-thunderbird-calendar" \
   "$HOME/.config/omarchy/plugins/pa.clock/focus-thunderbird-calendar" \
   "$HOME/.config/omarchy/plugins/pa.clock/new-thunderbird-event" \
+  "$HOME/.config/omarchy/plugins/pa.clock/quick-add-thunderbird" \
   "$HOME/.config/omarchy/plugins/pa.clock/thunderbird-newevent/build" \
   "$HOME/.config/omarchy/plugins/pa.clock/tests/run" \
   "$HOME/.config/omarchy/plugins/pa.weather/ha-room-temp"
 
-# Right-clicking a day in the clock popup opens Thunderbird's New Event dialog.
-# That dialog is only reachable from chrome JS, so the request goes through the
-# add-on in thunderbird-newevent/. Packed here; installing it is a manual step
-# below, because Thunderbird takes an unsigned .xpi only through its own UI.
+# The clock popup's entry pane creates events and tasks in Thunderbird, and a
+# bare date still opens its New Event dialog. Neither is reachable from outside
+# Thunderbird, so both go through the add-on in thunderbird-newevent/, which
+# watches ~/.local/state/omarchy/thunderbird-new-event.json. Packed here;
+# installing it is a manual step below, because Thunderbird takes an unsigned
+# .xpi only through its own UI. Reinstall it after an upgrade — the entry pane
+# needs 1.3.0 or newer.
 newevent_dir="$HOME/.config/omarchy/plugins/pa.clock/thunderbird-newevent"
 newevent_xpi="$HOME/.config/omarchy/plugins/pa.clock/thunderbird-newevent.xpi"
 if command -v zip >/dev/null; then

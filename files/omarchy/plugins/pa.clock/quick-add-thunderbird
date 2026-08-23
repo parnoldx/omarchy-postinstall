@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Drop a silent-create request for the Thunderbird add-on.
+#
+# One JSON argument, written atomically to the same path the add-on already
+# watches. The payload is never passed through a shell: Panel.qml hands it
+# as a Process argv element. Invalid JSON is refused so a typo cannot
+# clobber a pending request.
+set -euo pipefail
+
+json="${1:-}"
+if [[ -z "$json" ]]; then
+  echo "usage: ${0##*/} '<json>'" >&2
+  exit 1
+fi
+
+python3 -c 'import json,sys; json.loads(sys.argv[1])' "$json" || {
+  echo "invalid JSON" >&2
+  exit 1
+}
+
+# Spelled out rather than via XDG_STATE_HOME so it matches the add-on,
+# which resolves this path from $HOME alone.
+state_dir="$HOME/.local/state/omarchy"
+request="$state_dir/thunderbird-new-event.json"
+mkdir -p "$state_dir"
+
+tmp="$(mktemp "$request.XXXXXX")"
+printf '%s\n' "$json" >"$tmp"
+mv -f "$tmp" "$request"

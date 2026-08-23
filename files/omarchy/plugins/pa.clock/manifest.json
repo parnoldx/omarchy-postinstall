@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "id": "pa.clock",
   "name": "My Clock",
-  "version": "1.3.0",
+  "version": "1.6.0",
   "author": "Omarchy",
-  "description": "Date/time label with a calendar popup and a next-event reminder on the clock",
+  "description": "Date/time label with a calendar popup, natural-language event/task add with a colour-coded entry screen, and a next-event reminder on the clock",
   "kinds": [
     "bar-widget"
   ],

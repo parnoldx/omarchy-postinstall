@@ -26,6 +26,14 @@ class FirstMeetingUrl(unittest.TestCase):
         ))
         self.assertIn("jit.si", tbcal.first_meeting_url("room: https://meet.jit.si/Standup"))
 
+    def test_takes_http_links_as_well_as_https(self):
+        # The clock's own entry pane can be given an http link by hand; it is
+        # still the event's link when it comes back round.
+        self.assertEqual(
+            tbcal.first_meeting_url("URL", "http://zoom.us/j/123"),
+            "http://zoom.us/j/123",
+        )
+
     def test_ignores_meeting_words_that_are_not_the_host(self):
         self.assertEqual(tbcal.first_meeting_url("read https://github.com/meet.the-team/notes"), "")
         self.assertEqual(tbcal.first_meeting_url("https://example.com/zoom.us/not-a-meeting"), "")
