@@ -42,7 +42,7 @@ SKIP_AUR=0
 SKIP_PLYMOUTH=0
 
 # zip only for packing the clock's Thunderbird add-on into an .xpi.
-REPO_PACKAGES=(thunderbird bitwarden bitwarden-cli git-lfs libqalculate zip)
+REPO_PACKAGES=(thunderbird bitwarden bitwarden-cli git-lfs libqalculate zip rbw)
 AUR_PACKAGES=(cadassistant-appimage handy-bin microsoft-edge-stable-bin visual-studio-code-bin)
 
 usage() {
@@ -61,6 +61,10 @@ Home Assistant credentials (optional, prompted if missing):
 
 Weather (optional, prompted if missing):
   WEATHER_PLZ  German 5-digit postal code; resolved to a wetter.de location id
+
+Bitwarden vault (optional, prompted if missing):
+  RBW_EMAIL    Bitwarden account email for the rbw password picker
+  RBW_SERVER   self-hosted/Vaultwarden URL; empty for bitwarden.com
 
 Shelly door opener (optional, prompted if missing):
   SHELLY_AUTH_KEY  cloud auth_key for ha-tuer
@@ -187,6 +191,8 @@ desktop:
   Agent       pi (mise global, no agent launch)
   Editor      VS Code (omarchy-launch-editor + Files / xdg-open)
   Automation  Grok usage collector + Thunderbird calendar sync
+  Vault       rbw password TUI (floating terminal): fuzzy-find an entry,
+              copy password / username / TOTP; bare `bw` opens it
   Packages    ${REPO_PACKAGES[*]}
               AUR: ${AUR_PACKAGES[*]}
 
@@ -318,6 +324,42 @@ install_file "$FILES/bin/transcribe" "$HOME/.local/bin/transcribe" 755
 install_file "$FILES/bin/omarchy-agent-usage-grok" "$HOME/.local/bin/omarchy-agent-usage-grok" 755
 install_file "$FILES/bin/wetter-plz-lookup" "$HOME/.local/bin/wetter-plz-lookup" 755
 install_file "$FILES/bin/set-code-mime-defaults" "$HOME/.local/bin/set-code-mime-defaults" 755
+install_file "$FILES/bin/rbw-tui" "$HOME/.local/bin/rbw-tui" 755
+install_file "$FILES/bin/bw" "$HOME/.local/bin/bw" 755
+
+# --- bitwarden / rbw vault ---------------------------------------------------
+
+# ~/.local/bin precedes /usr/bin on PATH, so the bw shim shadows the official
+# bitwarden-cli: bare `bw` opens the rbw password TUI, `bw <args>` forwards to
+# rbw. The official CLI stays installed for direct use via /usr/bin/bw.
+log "Bitwarden vault (rbw)"
+rbw_dir="$HOME/.config/rbw"
+if [[ -f $rbw_dir/config.json ]]; then
+  log "rbw config already present"
+else
+  rbw_email="${RBW_EMAIL:-}"
+  rbw_server="${RBW_SERVER:-}"
+  if [[ -z $rbw_email || -z $rbw_server ]] && [[ -t 0 ]]; then
+    printf '\nBitwarden account for the rbw vault (fuzzy password picker in the menu).\n'
+    printf 'Server is only needed for self-hosted/Vaultwarden instances; empty for bitwarden.com.\n'
+    rbw_email="$(ask "Bitwarden email")"
+    rbw_server="$(ask "Server URL (empty = bitwarden.com)")"
+  fi
+  if [[ -n $rbw_email ]]; then
+    mkdir -p "$rbw_dir"
+    if [[ -n $rbw_server ]]; then
+      printf '{"email":"%s","sso_id":null,"base_url":"%s","identity_url":null,"ui_url":null,"notifications_url":null,"lock_timeout":3600,"sync_interval":3600,"pinentry":"pinentry","client_cert_path":null}\n' \
+        "$rbw_email" "$rbw_server" >"$rbw_dir/config.json"
+    else
+      printf '{"email":"%s","sso_id":null,"base_url":null,"identity_url":null,"ui_url":null,"notifications_url":null,"lock_timeout":3600,"sync_interval":3600,"pinentry":"pinentry","client_cert_path":null}\n' \
+        "$rbw_email" >"$rbw_dir/config.json"
+    fi
+    log "Wrote $rbw_dir/config.json"
+    warn "One-time setup remains: rbw register (API token from Bitwarden web vault → Settings → Security → Keys), then rbw sync"
+  else
+    warn "No RBW_EMAIL; run 'rbw config' manually later"
+  fi
+fi
 
 # --- home assistant ----------------------------------------------------------
 

@@ -1,0 +1,8 @@
+#!/bin/bash
+# bw shim: bare `bw` opens the rbw password TUI; everything else forwards to rbw,
+# so muscle memory from the official Bitwarden CLI lands you in the picker while
+# scripted calls keep working (e.g. `bw get github` behaves like `rbw get github`).
+if (( $# == 0 )); then
+  exec rbw-tui
+fi
+exec rbw "$@"
