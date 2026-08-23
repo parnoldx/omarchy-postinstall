@@ -443,17 +443,85 @@ MEETING_HOST = re.compile(
     re.I,
 )
 HTTPS_URL = re.compile(r"https://[^\s<>\"']+")
+ZOOM_ICS_NAME = re.compile(r"filename\*?=(?:UTF-8''|\"|)?meeting-(\d+)", re.I)
+
+
+def is_calendar_file_url(url: str) -> bool:
+    parsed = urllib.parse.urlparse(url)
+    path = (parsed.path or "").lower()
+    query = (parsed.query or "").lower()
+    return path.endswith("/ics") or path.endswith(".ics") or "icstoken=" in query
+
+
+def meeting_url_rank(url: str) -> int | None:
+    """Lower is better. None means 'not a join link' (calendar file, unknown host)."""
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.hostname or ""
+    if not MEETING_HOST.search(host):
+        return None
+    if is_calendar_file_url(url):
+        return None
+    path = (parsed.path or "").lower()
+    if "/j/" in path or "/w/" in path or "/my/" in path:
+        return 0
+    if "meet.google." in host:
+        return 0
+    if "meetup-join" in path or "/l/meetup" in path:
+        return 0
+    return 1
 
 
 def first_meeting_url(*texts: str) -> str:
+    found_urls: list[tuple[int, str]] = []
+    ics_urls: list[str] = []
+    seen: set[str] = set()
     for text in texts:
         if not text:
             continue
-        for found in HTTPS_URL.finditer(text):
-            url = found.group(0).rstrip(").,;")
-            if MEETING_HOST.search(url):
-                return url
+        for match in HTTPS_URL.finditer(text):
+            url = match.group(0).rstrip(").,;")
+            if url in seen:
+                continue
+            seen.add(url)
+            if is_calendar_file_url(url) and "zoom." in (urllib.parse.urlparse(url).hostname or ""):
+                ics_urls.append(url)
+                continue
+            rank = meeting_url_rank(url)
+            if rank is None:
+                continue
+            found_urls.append((rank, url))
+    if found_urls:
+        found_urls.sort(key=lambda item: item[0])
+        return found_urls[0][1]
+    for ics in ics_urls:
+        resolved = resolve_zoom_join(ics)
+        if resolved:
+            return resolved
     return ""
+
+
+def zoom_join_from_disposition(ics_url: str, content_disposition: str) -> str:
+    host = urllib.parse.urlparse(ics_url).hostname or ""
+    if "zoom." not in host.lower():
+        return ""
+    match = ZOOM_ICS_NAME.search(content_disposition or "")
+    if not match:
+        return ""
+    return f"https://{host}/j/{match.group(1)}"
+
+
+def resolve_zoom_join(ics_url: str) -> str:
+    req = urllib.request.Request(
+        ics_url,
+        method="GET",
+        headers={"User-Agent": "omarchy-pa-clock/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            disposition = resp.headers.get("Content-Disposition") or ""
+            return zoom_join_from_disposition(ics_url, disposition)
+    except Exception:
+        return ""
 
 
 def extract_calendar_data(xml_text: str) -> list[str]:

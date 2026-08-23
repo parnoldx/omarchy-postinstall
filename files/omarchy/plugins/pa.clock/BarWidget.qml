@@ -10,6 +10,11 @@ import "Model.js" as Model
 // Left click reveals the calendar — asking "what is the date?" is what a
 // click on a clock means — right click walks the common label formats, and
 // middle click opens the timezone picker.
+//
+// In the 5 minutes before a timed event, the clock keeps the time and
+// appends the reminder. The label stays the bar color until the last
+// minute, then turns urgent. Click opens the calendar popup (Join lives
+// there).
 BarWidget {
   id: root
   moduleName: "omarchy.clock"
@@ -34,21 +39,50 @@ BarWidget {
   readonly property var visibleEventList: panelLoader.item ? panelLoader.item.visibleEventList : []
   readonly property real nowMs: displayDate.getTime()
   readonly property int announceLeadMinutes: setting("announceLeadMinutes", 5)
+  readonly property int startedLeadMinutes: setting("startedLeadMinutes", 5)
   readonly property var upcomingEvent: Model.nextEvent(visibleEventList, nowMs)
+  property string dismissedKey: ""
   readonly property bool announcing: announceLeadMinutes > 0
-    && Model.shouldAnnounce(upcomingEvent, nowMs, announceLeadMinutes)
-  readonly property string countdownPhrase: announcing
-    ? (Model.formatCountdown(Model.millisUntil(upcomingEvent, nowMs)) || "")
-    : ""
+    && Model.shouldAnnounce(upcomingEvent, nowMs, announceLeadMinutes, startedLeadMinutes)
+    && !Model.isDismissed(upcomingEvent, dismissedKey)
+  readonly property bool joinable: Model.meetingUrlFor(upcomingEvent) !== ""
+  readonly property bool showReminder: announcing && !vertical
+  readonly property bool reminderUrgent: showReminder
+    && Model.isImminent(Model.millisUntil(upcomingEvent, nowMs))
 
-  readonly property string displayText: vertical || countdownPhrase === ""
-    ? formatted(displayDate)
-    : Model.announceLabel(formatted(displayDate), upcomingEvent.title, countdownPhrase)
-  readonly property var verticalLines: displayText.split("\n")
+  readonly property string displayText: {
+    var clockText = formatted(displayDate)
+    if (!showReminder) return clockText
+    var title = Model.truncateTitle(upcomingEvent && upcomingEvent.title)
+    var phrase = Model.formatStartsIn(Model.millisUntil(upcomingEvent, nowMs))
+    var reminder = title && phrase ? title + "  " + phrase : (title || phrase)
+    if (!reminder) return clockText
+    return clockText + "  ·  " + reminder
+  }
+  readonly property var verticalLines: formatted(displayDate).split("\n")
 
   function refresh() {
     displayDate = new Date()
     if (panelLoader.item && panelLoader.item.refresh) panelLoader.item.refresh()
+  }
+
+  function dismissReminder(event) {
+    var key = Model.occurrenceKey(event)
+    if (!key) return
+    var items = bar && typeof bar.moduleWidgets === "function"
+      ? bar.moduleWidgets(root.moduleName) : [root]
+    for (var i = 0; i < items.length; i++)
+      if (items[i]) items[i].dismissedKey = key
+    root.dismissedKey = key
+  }
+
+  // The URL never goes through a shell — Panel.openMeeting uses
+  // Qt.openUrlExternally after Model.safeUrl has refused anything that is
+  // not plain https. Joining also puts the reminder away.
+  function joinUpcoming() {
+    if (!root.joinable) return
+    if (panelLoader.item && panelLoader.item.openMeeting)
+      panelLoader.item.openMeeting(root.upcomingEvent)
   }
 
   function cycleFormat() {
@@ -126,7 +160,7 @@ BarWidget {
 
   SystemClock {
     id: clock
-    precision: SystemClock.Minutes
+    precision: SystemClock.Seconds
     onDateChanged: root.displayDate = date
   }
 
@@ -152,6 +186,7 @@ BarWidget {
     function show(): void { root.open() }
     function hide(): void { root.close() }
     function toggle(): void { root.togglePanel() }
+    function join(): void { root.joinUpcoming() }
   }
 
   IpcHandler {
@@ -165,6 +200,7 @@ BarWidget {
     function show(): void { root.open() }
     function hide(): void { root.close() }
     function toggle(): void { root.togglePanel() }
+    function join(): void { root.joinUpcoming() }
   }
 
   WidgetButton {
@@ -172,6 +208,9 @@ BarWidget {
     anchors.fill: parent
     bar: root.bar
     text: root.vertical ? "" : root.displayText
+    foreground: root.reminderUrgent
+      ? (root.bar ? root.bar.urgent : Color.urgent)
+      : (root.bar ? root.bar.barForeground : Color.foreground)
     labelVisible: !root.vertical
     hasVisualContent: root.vertical ? root.verticalLines.length > 0 : text !== ""
     fixedHeight: root.vertical ? root.verticalLines.length * Style.bar.iconSlot : -1

@@ -14,6 +14,9 @@
 # Assistant menu + weather, screensaver/about branding, Plymouth/SDDM Om
 # unlock logo, default agent pi, VS Code as editor (Omarchy + Files MIME),
 # Grok usage + Thunderbird calendar automation, extra packages.
+#
+# The clock's New Event add-on is built here but installed by hand: it is
+# unsigned, and Thunderbird has no CLI for installing add-ons.
 
 set -euo pipefail
 
@@ -25,7 +28,8 @@ SKIP_PACKAGES=0
 SKIP_AUR=0
 SKIP_PLYMOUTH=0
 
-REPO_PACKAGES=(thunderbird bitwarden bitwarden-cli git-lfs libqalculate)
+# zip only for packing the clock's Thunderbird add-on into an .xpi.
+REPO_PACKAGES=(thunderbird bitwarden bitwarden-cli git-lfs libqalculate zip)
 AUR_PACKAGES=(handy-bin microsoft-edge-stable-bin visual-studio-code-bin)
 
 usage() {
@@ -147,6 +151,9 @@ desktop:
               Thunderbird/Herdr overlays, Handy (NVIDIA ICD + dGPU keepalive),
               Super+J layout toggle
   Bar         transparent; pa.menu / pa.clock / pa.weather / pa.tray / pa.agents / Handy
+  Clock       month grid dotted in Thunderbird's own calendar colours;
+              right-click a day for Thunderbird's New Event dialog (add-on
+              packed to .xpi here, installed by hand in Thunderbird)
   HA          launcher Licht/Leselicht/Abdunkeln + room temp / dusk
   Weather     asks for a German PLZ, stores the wetter.de location URL locally;
               popup shows rain radar only while rain is falling or forecast today
@@ -206,7 +213,26 @@ install_tree "$FILES/omarchy/bar" "$HOME/.config/omarchy/bar"
 chmod 755 \
   "$HOME/.config/omarchy/plugins/pa.clock/sync-thunderbird-calendar" \
   "$HOME/.config/omarchy/plugins/pa.clock/focus-thunderbird-calendar" \
+  "$HOME/.config/omarchy/plugins/pa.clock/new-thunderbird-event" \
+  "$HOME/.config/omarchy/plugins/pa.clock/thunderbird-newevent/build" \
+  "$HOME/.config/omarchy/plugins/pa.clock/tests/run" \
   "$HOME/.config/omarchy/plugins/pa.weather/ha-room-temp"
+
+# Right-clicking a day in the clock popup opens Thunderbird's New Event dialog.
+# That dialog is only reachable from chrome JS, so the request goes through the
+# add-on in thunderbird-newevent/. Packed here; installing it is a manual step
+# below, because Thunderbird takes an unsigned .xpi only through its own UI.
+newevent_dir="$HOME/.config/omarchy/plugins/pa.clock/thunderbird-newevent"
+newevent_xpi="$HOME/.config/omarchy/plugins/pa.clock/thunderbird-newevent.xpi"
+if command -v zip >/dev/null; then
+  if "$newevent_dir/build" >/dev/null; then
+    log "Built $newevent_xpi"
+  else
+    warn "Could not pack the Thunderbird New Event add-on; run $newevent_dir/build later"
+  fi
+else
+  warn "zip missing; pack the New Event add-on later: $newevent_dir/build"
+fi
 
 if command -v omarchy-shell >/dev/null; then
   omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
@@ -441,3 +467,6 @@ log "Handy dictation: Ctrl+F1 (NVIDIA ICD + dGPU keepalive; model never unloads)
 log "File transcription: transcribe file.mp4 [-o out.txt]."
 log "Thunderbird overlay: Super+Shift+E. Herdr: Super+Shift+A."
 log "Grok usage in the agents panel needs: grok login"
+log "Clock right-click → New Event needs the add-on installed once:"
+log "  Thunderbird → Add-ons and Themes → gear → Install Add-on From File… →"
+log "  $newevent_xpi"

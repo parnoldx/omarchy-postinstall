@@ -79,7 +79,10 @@ Panel {
   property string selectedDayKey: todayKey
   readonly property var selectedEvents: Model.eventsForDateKey(eventIndex, selectedDayKey)
   readonly property date selectedDate: Model.dateFromKey(selectedDayKey, today)
-  readonly property string focusThunderbirdScript: (Quickshell.env("HOME") || "") + "/.config/omarchy/plugins/pa.clock/focus-thunderbird-calendar"
+  readonly property string clockPluginDir: (Quickshell.env("HOME") || "") + "/.config/omarchy/plugins/pa.clock"
+  readonly property string focusThunderbirdScript: clockPluginDir + "/focus-thunderbird-calendar"
+  readonly property string syncThunderbirdScript: clockPluginDir + "/sync-thunderbird-calendar"
+  readonly property string newEventScript: clockPluginDir + "/new-thunderbird-event"
 
   function applyEvents(raw) {
     var doc = Model.parseEventDocument(raw)
@@ -98,6 +101,16 @@ Panel {
     if (root.bar && root.bar.run) root.bar.run(root.focusThunderbirdScript)
   }
 
+  // Right-clicking a day hands it to Thunderbird's own New Event dialog. The
+  // argument goes through Process rather than bar.run, which would put the key
+  // through a shell.
+  function newEventOn(dayKey) {
+    if (!dayKey) return
+    newEventProc.command = [root.newEventScript, String(dayKey)]
+    newEventProc.running = true
+    root.close()
+  }
+
   // Qt.openUrlExternally rather than the shell helper on purpose. That helper
   // runs `bash -lc`, and a meeting link is supplied by whoever sent the
   // invitation, so putting it through a shell would be a command injection.
@@ -109,7 +122,11 @@ Panel {
   }
 
   function openMeeting(event) {
-    root.openExternally(Model.meetingUrlFor(event))
+    var url = Model.meetingUrlFor(event)
+    if (!url) return
+    if (root.hostWidget && typeof root.hostWidget.dismissReminder === "function")
+      root.hostWidget.dismissReminder(event)
+    root.openExternally(url)
   }
 
   function formatSelectedHeroLabel() {
@@ -128,9 +145,15 @@ Panel {
   readonly property int weekColumnWidth: Style.space(32)
   readonly property int gutterWidth: Style.space(14)
 
+  function syncCalendars() {
+    if (syncProc.running) return
+    syncProc.running = true
+  }
+
   function open() {
     eventsFile.reload()
     refresh()
+    root.syncCalendars()
     root.controller.show()
     // Set after showing, not before: showing hands the popout coordinator
     // over, which closes whichever panel was open, and that close clears the
@@ -271,6 +294,17 @@ Panel {
   // carry ("man." -> "MAN") so the header row stays a clean band of caps.
   function weekdayLabel(weekday) {
     return String(Qt.locale().dayName(weekday, Locale.ShortFormat)).replace(/\.$/, "").toUpperCase()
+  }
+
+  Process {
+    id: syncProc
+    command: [root.syncThunderbirdScript]
+    running: false
+  }
+
+  Process {
+    id: newEventProc
+    running: false
   }
 
   FileView {
@@ -731,58 +765,98 @@ Panel {
                     model: modelData.days
 
                     Item {
+                      id: dayCell
                       required property var modelData
                       width: root.cellWidth
                       height: root.cellHeight
 
                       readonly property bool selected: modelData.key === root.selectedDayKey
 
+                      // Thunderbird's own calendar colours, so work and personal
+                      // days read apart here the way they do in Thunderbird. The
+                      // dots carry that and nothing else: a cell washed in the
+                      // calendar's colour would make "has something on it" a
+                      // different shade every day, and that band is what the eye
+                      // reads first when scanning the month.
+                      readonly property var dayColors: modelData.colors || []
+
                       Rectangle {
                         anchors.fill: parent
                         radius: Style.cornerRadius
-                        color: parent.selected
-                          ? Style.hoverFillFor(root.contentForeground, Color.accent)
-                          : modelData.today
+                        // Today outranks the selection, which starts on today
+                        // anyway: the one cell you look for first gets the
+                        // theme's strongest fill and a solid ring at double
+                        // width, so it carries further than the translucent
+                        // wash every day holding an event already has.
+                        color: modelData.today
+                          ? Style.selectionFillFor(root.contentForeground, Color.accent)
+                          : parent.selected
                             ? Style.hoverFillFor(root.contentForeground, Color.accent)
                             : modelData.hasEvent
                               ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.15)
                               : "transparent"
-                        border.width: (modelData.today || parent.selected || modelData.hasEvent) ? Style.spacing.hairline : 0
-                        border.color: parent.selected
-                          ? Style.normalBorderFor(root.contentForeground, Color.accent)
-                          : modelData.hasEvent
-                            ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.5)
-                            : Style.normalBorderFor(root.contentForeground, Color.accent)
+                        border.width: modelData.today
+                          ? Style.spacing.hairline * 2
+                          : (parent.selected || modelData.hasEvent) ? Style.spacing.hairline : 0
+                        border.color: modelData.today
+                          ? Style.selectedBorderFor(root.contentForeground, Color.accent)
+                          : parent.selected
+                            ? Style.normalBorderFor(root.contentForeground, Color.accent)
+                            : modelData.hasEvent
+                              ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.5)
+                              : Style.normalBorderFor(root.contentForeground, Color.accent)
 
                         Text {
                           anchors.centerIn: parent
                           anchors.verticalCenterOffset: modelData.hasEvent ? -Style.space(2) : 0
                           text: modelData.day
-                          color: modelData.inMonth
-                            ? (modelData.weekend ? Qt.darker(root.contentForeground, 1.45) : root.contentForeground)
-                            : Qt.darker(root.contentForeground, 2.2)
+                          // Today is never dimmed, weekend or not: it sits on
+                          // the brightest fill in the grid, and the muted
+                          // weekend grey would leave the one date you came for
+                          // the hardest to read.
+                          color: modelData.today
+                            ? root.contentForeground
+                            : modelData.inMonth
+                              ? (modelData.weekend ? Qt.darker(root.contentForeground, 1.45) : root.contentForeground)
+                              : Qt.darker(root.contentForeground, 2.2)
                           font.family: root.contentFontFamily
                           font.pixelSize: Style.font.body
                           font.bold: modelData.today
                         }
 
-                        Rectangle {
-                          width: Style.space(4)
-                          height: Style.space(4)
-                          radius: Style.space(2)
+                        // One dot per calendar with something on that day. Three
+                        // is what fits under a day number, so a fourth calendar
+                        // goes without a dot rather than crowding the cell — the
+                        // day list below still names everything.
+                        Row {
                           anchors.horizontalCenter: parent.horizontalCenter
                           anchors.bottom: parent.bottom
                           anchors.bottomMargin: Style.space(3)
-                          color: Color.accent
+                          spacing: Style.space(2)
                           opacity: modelData.hasEvent ? 1 : 0
+
+                          Repeater {
+                            model: Math.min(Math.max(dayCell.dayColors.length, 1), 3)
+
+                            Rectangle {
+                              required property int index
+                              width: Style.space(4)
+                              height: Style.space(4)
+                              radius: Style.space(2)
+                              color: dayCell.dayColors[index] || Color.accent
+                            }
+                          }
                         }
                       }
 
                       MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                          if (modelData.inMonth) root.selectDay(modelData.key)
+                        acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        onClicked: function(mouse) {
+                          if (!modelData.inMonth) return
+                          root.selectDay(modelData.key)
+                          if (mouse.button === Qt.RightButton) root.newEventOn(modelData.key)
                         }
                       }
                     }
@@ -893,7 +967,8 @@ Panel {
                   width: Style.space(3)
                   height: parent.height - Style.space(4)
                   radius: 2
-                  color: Color.accent
+                  // The event's own calendar colour, matching the day dots above.
+                  color: Model.eventColor(eventRow.modelData) || Color.accent
                   anchors.verticalCenter: parent.verticalCenter
                 }
 

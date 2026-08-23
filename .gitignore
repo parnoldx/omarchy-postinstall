@@ -1,4 +1,6 @@
 __pycache__/
 *.py[cod]
+# Packed by thunderbird-newevent/build during install.
+*.xpi
 .DS_Store
 *.bak.*

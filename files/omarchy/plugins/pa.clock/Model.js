@@ -248,7 +248,8 @@ function monthGrid(year, month, weekStart, todayKey, eventIndex) {
         inMonth: cellMonth === month && cellYear === year,
         weekend: weekday === 0 || weekday === 6,
         today: key === today,
-        hasEvent: eventIndex ? !!eventIndex[key] : false
+        hasEvent: eventIndex ? !!eventIndex[key] : false,
+        colors: eventIndex ? dayColors(eventIndex[key]) : []
       })
       cursor.setDate(cursor.getDate() + 1)
     }
@@ -325,36 +326,107 @@ var MINUTE_MS = 60 * 1000
 var HOUR_MS = 60 * MINUTE_MS
 var DAY_MS = 24 * HOUR_MS
 
+function eventStartMs(event) {
+  if (!event || !event.start) return NaN
+  return Date.parse(event.start)
+}
+
+function eventEndMs(event) {
+  if (!event) return NaN
+  if (event.end) {
+    var end = Date.parse(event.end)
+    if (!isNaN(end)) return end
+  }
+  var start = eventStartMs(event)
+  if (isNaN(start)) return NaN
+  return start + HOUR_MS
+}
+
+// Timed events only. All-day rows stay on the calendar grid and never
+// take the bar: they have no join link and no "in 4m" that would mean
+// anything.
+function isInProgress(event, nowMs) {
+  if (!event || event.allDay) return false
+  var start = eventStartMs(event)
+  var end = eventEndMs(event)
+  if (isNaN(start) || isNaN(end)) return false
+  return nowMs >= start && nowMs < end
+}
+
+// Current meeting first, otherwise the soonest timed start still ahead.
+// MeetingBar keeps the join target on the bar after the hour, so a click
+// at 10:01 still opens the 10:00 standup rather than the 11:00 next.
 function nextEvent(events, nowMs) {
-  var best = null
-  var bestMs = null
+  var current = null
+  var currentStart = null
+  var upcoming = null
+  var upcomingStart = null
 
   for (var i = 0; i < (events || []).length; i++) {
     var event = events[i]
     if (!event || event.allDay) continue
 
-    var startMs = Date.parse(event.start)
-    if (isNaN(startMs) || startMs < nowMs) continue
+    var startMs = eventStartMs(event)
+    if (isNaN(startMs)) continue
 
-    if (bestMs === null || startMs < bestMs) {
-      bestMs = startMs
-      best = event
+    if (isInProgress(event, nowMs)) {
+      if (currentStart === null || startMs < currentStart) {
+        current = event
+        currentStart = startMs
+      }
+      continue
+    }
+
+    if (startMs < nowMs) continue
+    if (upcomingStart === null || startMs < upcomingStart) {
+      upcoming = event
+      upcomingStart = startMs
     }
   }
 
-  return best
+  return current || upcoming
 }
 
 function formatCountdown(deltaMs) {
-  if (deltaMs === null || isNaN(deltaMs) || deltaMs < 0 || deltaMs >= DAY_MS) return null
+  if (deltaMs === null || isNaN(deltaMs)) return null
+  if (deltaMs >= DAY_MS || deltaMs < -DAY_MS) return null
   if (deltaMs < MINUTE_MS) return "now"
 
   var minutes = Math.floor(deltaMs / MINUTE_MS)
-  if (minutes < 60) return "in " + minutes + "min"
+  if (minutes < 60) return "in " + minutes + "m"
 
   var hours = Math.floor(minutes / 60)
   var rest = minutes % 60
-  return rest === 0 ? "in " + hours + "h" : "in " + hours + "h " + rest + "min"
+  return rest === 0 ? "in " + hours + "h" : "in " + hours + "h " + rest + "m"
+}
+
+// "starts in 5 minutes", then "starts now" in the last minute.
+function formatStartsIn(deltaMs) {
+  if (deltaMs === null || isNaN(deltaMs)) return ""
+  if (deltaMs < MINUTE_MS) return "starts now"
+  var minutes = Math.floor(deltaMs / MINUTE_MS)
+  if (minutes <= 0) return "starts now"
+  if (minutes === 1) return "starts in 1 minute"
+  if (minutes < 60) return "starts in " + minutes + " minutes"
+  var hours = Math.floor(minutes / 60)
+  var rest = minutes % 60
+  if (rest === 0) return hours === 1 ? "starts in 1 hour" : "starts in " + hours + " hours"
+  return "starts in " + hours + "h " + rest + "m"
+}
+
+// Red only in the last minute, including "starts now".
+function isImminent(deltaMs) {
+  if (deltaMs === null || isNaN(deltaMs)) return false
+  return deltaMs < MINUTE_MS
+}
+
+function joinButtonLabel(url) {
+  var text = String(url || "").toLowerCase()
+  if (text.indexOf("zoom.") !== -1) return "Join Zoom"
+  if (text.indexOf("meet.google.") !== -1) return "Join Meet"
+  if (text.indexOf("teams.") !== -1) return "Join Teams"
+  if (text.indexOf("jit.si") !== -1 || text.indexOf("jitsi") !== -1) return "Join Jitsi"
+  return "Join"
 }
 
 var MAX_ANNOUNCE_TITLE = 28
@@ -380,10 +452,41 @@ function millisUntil(event, nowMs) {
   return startMs - nowMs
 }
 
-function shouldAnnounce(event, nowMs, leadMinutes) {
+function shouldAnnounce(event, nowMs, leadMinutes, startedLeadMinutes) {
+  if (!event) return false
   var delta = millisUntil(event, nowMs)
-  if (delta === null || delta < 0) return false
-  return delta <= leadMinutes * MINUTE_MS
+  if (delta === null) return false
+
+  if (delta <= 0) {
+    if (!isInProgress(event, nowMs)) return false
+    var startedLead = startedLeadMinutes === undefined || startedLeadMinutes === null
+      ? 5
+      : Number(startedLeadMinutes)
+    if (!isFinite(startedLead) || startedLead <= 0) return false
+    return -delta <= startedLead * MINUTE_MS
+  }
+
+  var lead = Number(leadMinutes)
+  if (!isFinite(lead) || lead <= 0) return false
+  return delta <= lead * MINUTE_MS
+}
+
+function occurrenceKey(event) {
+  if (!event) return ""
+  var id = String(event.id || "")
+  var start = String(event.start || "")
+  if (!id && !start) return ""
+  return id + "|" + start
+}
+
+function isDismissed(event, dismissedKey) {
+  var key = occurrenceKey(event)
+  return key !== "" && key === String(dismissedKey || "")
+}
+
+function joinTooltip(event) {
+  var title = String(event && event.title ? event.title : "").replace(/^\s+|\s+$/g, "")
+  return title ? "Join " + title : "Join meeting"
 }
 
 function eventDisplayTime(event) {
@@ -407,8 +510,41 @@ function safeUrl(url) {
   return text
 }
 
+// Thunderbird keeps a colour per calendar and the sync script carries it onto
+// every event, so a work event and a personal one on the same day can be told
+// apart at a glance instead of both reading as the theme accent. Validated
+// rather than trusted: the value comes out of the profile prefs, and QML turns
+// anything it cannot parse into black rather than falling back.
+function safeColor(value) {
+  var text = String(value || "").trim()
+  return /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(text) ? text : ""
+}
+
+function eventColor(event) {
+  return event ? safeColor(event.color) : ""
+}
+
+// The distinct calendar colours on one day, in the order their first event
+// falls. A day with three events out of one calendar gets one dot; a day
+// split across two calendars gets two.
+function dayColors(events) {
+  var colors = []
+  for (var i = 0; events && i < events.length; i++) {
+    var color = eventColor(events[i])
+    if (color && colors.indexOf(color) === -1) colors.push(color)
+  }
+  return colors
+}
+
+function isCalendarFileUrl(url) {
+  var text = String(url || "")
+  return /\/ics(\?|$)/i.test(text) || /\.ics(\?|$)/i.test(text) || /icsToken=/i.test(text)
+}
+
 function meetingUrlFor(event) {
-  return event ? safeUrl(event.meetingUrl) : ""
+  var text = event ? safeUrl(event.meetingUrl) : ""
+  if (!text || isCalendarFileUrl(text)) return ""
+  return text
 }
 
 if (typeof module !== "undefined") {
@@ -442,13 +578,26 @@ if (typeof module !== "undefined") {
     formatDateKey: formatDateKey,
     parseEventDocument: parseEventDocument,
     nextEvent: nextEvent,
+    eventStartMs: eventStartMs,
+    eventEndMs: eventEndMs,
+    isInProgress: isInProgress,
     formatCountdown: formatCountdown,
+    formatStartsIn: formatStartsIn,
+    isImminent: isImminent,
+    joinButtonLabel: joinButtonLabel,
     truncateTitle: truncateTitle,
     announceLabel: announceLabel,
     millisUntil: millisUntil,
     shouldAnnounce: shouldAnnounce,
+    occurrenceKey: occurrenceKey,
+    isDismissed: isDismissed,
+    joinTooltip: joinTooltip,
     eventDisplayTime: eventDisplayTime,
     safeUrl: safeUrl,
+    safeColor: safeColor,
+    eventColor: eventColor,
+    dayColors: dayColors,
+    isCalendarFileUrl: isCalendarFileUrl,
     meetingUrlFor: meetingUrlFor
   }
 }

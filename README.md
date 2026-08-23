@@ -22,6 +22,8 @@ HA_URL=http://homeassistant.local:8123 HA_TOKEN=... SHELLY_AUTH_KEY=... WEATHER_
 
 `--skip-packages` skips pacman/AUR. `--skip-aur` installs official repos only. `--skip-plymouth` copies the Om logo but does not rebuild the initramfs.
 
+The clock popup dots each day in the colours Thunderbird gives those calendars, and right-clicking a day opens Thunderbird's New Event dialog on it. That last part goes through a small Thunderbird add-on (`files/omarchy/plugins/pa.clock/thunderbird-newevent/`), which the install packs into `~/.config/omarchy/plugins/pa.clock/thunderbird-newevent.xpi`. Install it once by hand — it is unsigned and Thunderbird has no CLI for this: **Add-ons and Themes → gear → Install Add-on From File…**. Arch's Thunderbird accepts it because that build sets `MOZ_REQUIRE_SIGNING=false`.
+
 After install, sign into Thunderbird (calendar popup) and run `grok login` (agents usage). Right-click on the weather pill opens the wetter.de forecast resolved from `WEATHER_PLZ`. The weather popup adds a RainViewer map when precipitation is current or forecast today.
 
 `omarchy default editor` only covers Omarchy launchers (`$EDITOR`, keybindings). Files / `xdg-open` still follow MIME, which Omarchy ships as Neovim. The post-install sets both: `omarchy default editor code` and `~/.config/mimeapps.list` for text/source types. Re-apply MIME later with `set-code-mime-defaults`.

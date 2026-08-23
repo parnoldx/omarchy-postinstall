@@ -1,0 +1,20 @@
+[
+  {
+    "namespace": "omarchyNewEvent",
+    "functions": [
+      {
+        "name": "watch",
+        "type": "function",
+        "async": true,
+        "description": "Start watching the request file the clock widget writes.",
+        "parameters": [
+          {
+            "name": "path",
+            "type": "string",
+            "description": "Absolute path of the JSON request file."
+          }
+        ]
+      }
+    ]
+  }
+]

@@ -1,0 +1,25 @@
+{
+  "manifest_version": 2,
+  "name": "Omarchy Clock — New Event",
+  "version": "1.0.0",
+  "description": "Opens Thunderbird's New Event dialog on the day the Omarchy clock widget asks for.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "omarchy-clock-newevent@pa.local",
+      "strict_min_version": "128.0"
+    }
+  },
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "experiment_apis": {
+    "omarchyNewEvent": {
+      "schema": "schema.json",
+      "parent": {
+        "scopes": ["addon_parent"],
+        "paths": [["omarchyNewEvent"]],
+        "script": "api.js"
+      }
+    }
+  }
+}

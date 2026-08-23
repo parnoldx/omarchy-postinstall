@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Ask Thunderbird to open its New Event dialog on a given day.
+#
+# Thunderbird has no CLI for this, so the request goes through the
+# "Omarchy Clock — New Event" add-on (thunderbird-newevent/), which watches
+# the file written below. Show the mail overlay first: the dialog is a new
+# window, and Hyprland puts it on whatever workspace is focused when it opens,
+# so raising Thunderbird first keeps it next to the calendar it belongs to.
+set -euo pipefail
+
+day="${1:-}"
+if [[ ! "$day" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+  echo "usage: ${0##*/} YYYY-MM-DD" >&2
+  exit 1
+fi
+
+here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+"$here/focus-thunderbird-calendar" || true
+
+# Spelled out rather than via XDG_STATE_HOME so it matches the add-on and
+# sync-thunderbird-calendar, which both resolve this path from $HOME alone.
+state_dir="$HOME/.local/state/omarchy"
+request="$state_dir/thunderbird-new-event.json"
+mkdir -p "$state_dir"
+
+# Written whole and moved into place: the add-on polls, and half a file would
+# parse as a malformed request.
+tmp="$(mktemp "$request.XXXXXX")"
+printf '{"date":"%s"}\n' "$day" >"$tmp"
+mv -f "$tmp" "$request"
