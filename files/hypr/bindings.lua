@@ -30,6 +30,11 @@ o.bind("CTRL + F1", "Toggle dictation", os.getenv("HOME") .. "/.local/bin/handy-
 -- Super+Shift+E was Hey Email. Super+Shift+A was ChatGPT.
 -- Toggle Thunderbird / Herdr on special workspaces. Launch puts the next
 -- matching window on the overlay and shows it; later presses show/hide.
+-- Super+Shift+F now matches Super+Alt+Shift+F (file manager in cwd).
+-- Unbind existing SUPER+SHIFT+F (was: File manager)
+hl.unbind("SUPER + SHIFT + F")
+o.bind("SUPER + SHIFT + F", "File manager (cwd)", { omarchy = "nautilus-cwd" })
+
 hl.unbind("SUPER + SHIFT + E")
 hl.unbind("SUPER + SHIFT + A")
 
@@ -71,7 +76,12 @@ end
 
 local overlays = {
   mail = {
-    launch = o.launch("thunderbird"),
+    -- MOZ_LEGACY_HOME=1 works around Thunderbird <=153.x creating an empty
+    -- ~/thunderbird folder on every start (bug in its XDG-migration code;
+    -- upstream fix is already in mozilla-central).
+    -- REMOVE THIS when your thunderbird is newer than 153.x AND deleting
+    -- ~/thunderbird and starting Thunderbird once no longer recreates it.
+    launch = o.launch("env MOZ_LEGACY_HOME=1 thunderbird"),
     is_app = function(win)
       return window_class(win):find("thunderbird", 1, true) ~= nil
     end,
@@ -79,7 +89,7 @@ local overlays = {
   herdr = {
     -- Dedicated Foot window so Neo compose works and the overlay stays
     -- identifiable (app-id org.omarchy.herdr) instead of a generic foot.
-    launch = o.launch("foot --app-id=org.omarchy.herdr herdr"),
+    launch = o.launch("foot --app-id=org.omarchy.herdr herdr --session agents"),
     is_app = function(win)
       return window_class(win):find("herdr", 1, true) ~= nil
     end,
@@ -196,3 +206,16 @@ o.bind("SUPER + J", "Toggle window split / consume or expel", toggle_window_layo
 -- Logitech MX Keys examples:
 -- o.bind("SUPER + SHIFT + S", nil, "omarchy-capture-screenshot")
 -- o.bind("SUPER + PERIOD", nil, "omarchy-shell shell toggle omarchy.emojis")
+
+-- Rebind SUPER+SHIFT+G from Signal to WhatsApp.
+-- (WhatsApp also remains on SUPER+SHIFT+ALT+G.)
+hl.unbind("SUPER + SHIFT + G")
+o.bind("SUPER + SHIFT + G", "WhatsApp", { webapp = "https://web.whatsapp.com/", focus = true })
+
+-- Swap the Display and Calendar panel keybindings.
+-- Defaults: SUPER+CTRL+D = Display, SUPER+CTRL+ALT+D = Calendar.
+-- After this: SUPER+CTRL+D = Calendar, SUPER+CTRL+ALT+D = Display.
+hl.unbind("SUPER + CTRL + D")
+hl.unbind("SUPER + CTRL + ALT + D")
+o.bind("SUPER + CTRL + ALT + D", "Display", "omarchy-shell shell toggle omarchy.monitor")
+o.bind("SUPER + CTRL + D", "Calendar", "omarchy-shell shell toggle omarchy.clock")
