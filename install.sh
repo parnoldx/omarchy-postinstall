@@ -15,7 +15,8 @@
 # Home Assistant menu + weather, screensaver/about branding, Plymouth/SDDM Om
 # unlock logo, default agent pi, VS Code as editor (Omarchy + Files MIME),
 # Grok usage + mailbox (CLI, daemon, clock + email bar widgets) +
-# sunrise/sunset nightlight automation, extra packages.
+# sunrise/sunset nightlight automation, fzf/yazi file finder, a kill-process
+# TUI, seven community bar plugins, and extra packages.
 #
 # CAD Assistant is made usable here twice over: its bundled 2021 Qt5 breaks
 # under Wayland (QT_QPA_PLATFORM=xcb wrapper), and the AppImage's desktop
@@ -44,8 +45,20 @@ SKIP_AUR=0
 SKIP_PLYMOUTH=0
 
 # go is for building mailbox from source.
-REPO_PACKAGES=(thunderbird bitwarden bitwarden-cli git-lfs libqalculate go rbw)
+REPO_PACKAGES=(thunderbird bitwarden bitwarden-cli git-lfs libqalculate go rbw fd fzf yazi flea)
 AUR_PACKAGES=(cadassistant-appimage handy-bin microsoft-edge-stable-bin visual-studio-code-bin)
+
+# Community bar/overlay plugins that shell.json's layout references but does
+# not vendor. id|git-url pairs; installed with `omarchy plugin add`.
+THIRD_PARTY_PLUGINS=(
+  "andreconde.quick-look|https://github.com/andreconde21/omarchy-quick-look.git"
+  "bjarneo.workspace-layout|https://github.com/bjarneo/omarchy-workspace-layout"
+  "io.github.itsdotdev.youtube-music|https://github.com/itsdotdev/omarchy-youtube-music.git"
+  "jankeesvw.time-machine|https://github.com/jankeesvw/omarchy-time-machine"
+  "jrmmhm.pocket|https://github.com/jrmmhm/omarchy-pocket.git"
+  "tiedeyez.omatree|https://github.com/Tiedeyez/omatree"
+  "yordanbuilds.jot|https://github.com/yordanbuilds/jot.git"
+)
 
 usage() {
   cat <<'EOF'
@@ -185,7 +198,14 @@ desktop:
               Thunderbird/Herdr overlays, Handy (NVIDIA ICD + dGPU keepalive),
               Super+J layout toggle, Chromium/Edge VAAPI on Intel iGPU
   Bar         transparent; pa.menu / mailbox.clock / mailbox.email /
-              pa.weather / pa.tray / pa.agents / Handy
+              pa.weather / pa.tray / pa.agents / Handy / YouTube Music /
+              Time Machine, Workspace Layout (grouped into Pocket) / Omatree
+  Finder      Super+Ctrl+F fzf+yazi file search (also browse / by-type
+              variants); Super+Shift+F flea file manager; Super+N Jot
+  Plugins     Quick Look, Jot, Workspace Layout, Time Machine, Pocket,
+              Omatree, YouTube Music (community, installed via
+              `omarchy plugin add`); stock Omarchy menu disabled (pa.menu
+              replaces it)
   Mailbox     CLI + socket-activated daemon; bar clock (calendar popup,
               natural-language event/task add) and email widget (unread +
               screener); Super+Shift+Alt+E toggles the mail panel
@@ -205,6 +225,8 @@ desktop:
               sunrise/sunset nightlight
   Vault       rbw password TUI (floating terminal): fuzzy-find an entry,
               copy password / username / TOTP; bare `bw` opens it
+  Kill        kill-tui (floating terminal): fuzzy-find a process, SIGTERM/
+              SIGKILL it; menu entry "Kill Process"
   Packages    ${REPO_PACKAGES[*]}
               AUR: ${AUR_PACKAGES[*]}
 
@@ -255,6 +277,10 @@ log "Installing Hyprland overlays"
 for f in hyprland.lua bindings.lua autostart.lua input.lua looknfeel.lua monitors.lua; do
   install_file "$FILES/hypr/$f" "$HOME/.config/hypr/$f"
 done
+
+log "Installing fzf + yazi file finder scripts"
+install_tree "$FILES/hypr/fzfyazi" "$HOME/.config/hypr/fzfyazi"
+chmod 755 "$HOME/.config/hypr/fzfyazi/"*.sh
 
 log "Building NeoQwertz keymap (NumLock does not lock layer 4)"
 install_file "$FILES/xkb/build-neoqwertz.sh" "$HOME/.config/xkb/build-neoqwertz.sh" 755
@@ -310,6 +336,21 @@ if ! make -C "$mailbox_src" skill; then
   warn "mailbox skill not installed; later: make -C $mailbox_src skill"
 fi
 
+log "Installing third-party bar plugins referenced by shell.json"
+if command -v omarchy >/dev/null; then
+  for entry in "${THIRD_PARTY_PLUGINS[@]}"; do
+    id="${entry%%|*}"
+    url="${entry#*|}"
+    if [[ -d $HOME/.config/omarchy/plugins/$id ]]; then
+      log "$id already installed"
+    else
+      run omarchy plugin add "$url" --enable --yes || warn "Could not install plugin $id ($url)"
+    fi
+  done
+else
+  warn "omarchy not on PATH; skip third-party plugin install"
+fi
+
 if command -v omarchy-shell >/dev/null; then
   omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
 fi
@@ -356,6 +397,7 @@ install_file "$FILES/bin/set-code-mime-defaults" "$HOME/.local/bin/set-code-mime
 install_file "$FILES/bin/rbw-tui" "$HOME/.local/bin/rbw-tui" 755
 install_file "$FILES/bin/bw" "$HOME/.local/bin/bw" 755
 install_file "$FILES/bin/vault-bridge" "$HOME/.local/bin/vault-bridge" 755
+install_file "$FILES/bin/kill-tui" "$HOME/.local/bin/kill-tui" 755
 
 # Shadows /usr/share/applications/bitwarden.desktop so the launcher and
 # search open the same rbw TUI as the Passwörter menu entry, not the
@@ -632,6 +674,7 @@ log "Handy dictation: Ctrl+F1 (NVIDIA ICD + dGPU keepalive; model never unloads)
 log "File transcription: transcribe file.mp4 [-o out.txt]."
 log "Thunderbird overlay: Super+Shift+E. Herdr: Super+Shift+A."
 log "Mailbox panel: Super+Shift+Alt+E. Calendar: Super+Ctrl+D."
+log "File finder: Super+Ctrl+F. File manager: Super+Shift+F. Kill a process: menu -> Kill Process. Jot: Super+N."
 log "Grok usage in the agents panel needs: grok login"
 if [[ ! -f $HOME/.config/mailbox/config.toml ]]; then
   log "Mailbox still needs: mailbox setup"

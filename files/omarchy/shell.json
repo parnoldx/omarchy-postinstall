@@ -15,6 +15,9 @@
         },
         {
           "id": "omarchy.workspaces"
+        },
+        {
+          "id": "io.github.itsdotdev.youtube-music"
         }
       ],
       "center": [
@@ -47,7 +50,8 @@
         {
           "id": "mailbox.email",
           "notify": false,
-          "openCommand": ""
+          "openCommand": "",
+          "hideWhenEmpty": true
         },
         {
           "id": "pa.weather",
@@ -60,13 +64,33 @@
       ],
       "right": [
         {
-          "id": "pa.tray"
-        },
-        {
-          "id": "pa.agents"
+          "id": "pa.tray",
+          "pinned": [],
+          "hidden": [
+            "Antigravity_status_icon_1"
+          ]
         },
         {
           "id": "omarchy.bluetooth"
+        },
+        {
+          "id": "jankeesvw.time-machine"
+        },
+        {
+          "id": "omarchy.monitor"
+        },
+        {
+          "id": "bjarneo.workspace-layout"
+        },
+        {
+          "id": "jrmmhm.pocket",
+          "members": "omarchy.bluetooth, jankeesvw.time-machine, omarchy.monitor, bjarneo.workspace-layout"
+        },
+        {
+          "id": "tiedeyez.omatree"
+        },
+        {
+          "id": "pa.agents"
         },
         {
           "id": "omarchy.network"
@@ -75,14 +99,24 @@
           "id": "omarchy.audio"
         },
         {
-          "id": "omarchy.monitor"
-        },
-        {
           "id": "omarchy.power",
           "showPercentage": true
         }
       ]
     }
   },
-  "plugins": []
+  "plugins": [
+    {
+      "id": "andreconde.quick-look"
+    },
+    {
+      "id": "yordanbuilds.jot"
+    }
+  ],
+  "disabledPlugins": [
+    "omarchy.menu"
+  ],
+  "cloneSourceRestores": [
+    "pa.menu"
+  ]
 }

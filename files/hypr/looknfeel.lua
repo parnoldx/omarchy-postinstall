@@ -62,3 +62,9 @@ hl.config({
 --     column_width = 0.97,
 --   },
 -- })
+
+-- Fuzzy file finder (SUPER+CTRL+F). Wide enough for yazi's list + preview.
+-- https://wiki.hypr.land/Configuring/Basics/Window-Rules/
+o.window("^(org\\.omarchy\\.finder)$", { name = "windowrule-fzfyazi-finder", float = true })
+o.window("^(org\\.omarchy\\.finder)$", { center = true })
+o.window("^(org\\.omarchy\\.finder)$", { size = { "monitor_w * 0.82", "monitor_h * 0.82" } })

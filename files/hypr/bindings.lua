@@ -226,3 +226,38 @@ o.bind("SUPER + CTRL + D", "Calendar", "omarchy-shell shell toggle mailbox.clock
 -- Open/toggle Mailbox email notification panel
 hl.unbind("SUPER + SHIFT + ALT + E")
 o.bind("SUPER + SHIFT + ALT + E", "Mailbox panel", "omarchy-shell shell toggle mailbox.email")
+
+-- fzf + yazi file finder (Walker `-m files` replacement).
+-- SUPER+CTRL+F was Tiled full screen (still on SUPER+ALT+F as Full width;
+-- SUPER+F remains Full screen). The script launches its own terminal.
+-- Floating size for org.omarchy.finder is set in looknfeel.lua.
+local fzfyazi = os.getenv("HOME") .. "/.config/hypr/fzfyazi/fuzzy-file-names.sh"
+hl.unbind("SUPER + CTRL + F") -- default: Tiled full screen
+o.bind("SUPER + CTRL + F", "Search files (Yazi)", fzfyazi)
+o.bind("SUPER + CTRL + SHIFT + F", "Browse files (fuzzy)", fzfyazi .. " browse")
+o.bind("SUPER + CTRL + ALT + F", "Search by file type", fzfyazi .. " type")
+
+
+-- flea --default: begin. Written by `flea --default`; `flea --default off` removes the block whole.
+hl.unbind("SUPER + SHIFT + F")
+o.bind("SUPER + SHIFT + F", "File manager", { launch = 'flea --gui' })
+hl.unbind("SUPER + ALT + SHIFT + F")
+o.bind("SUPER + ALT + SHIFT + F", "File manager (cwd)", { launch = 'flea --gui "$(omarchy-cmd-terminal-cwd)"' })
+-- flea --default: end.
+
+-- >>> jot >>>  Added at your request — yours to edit or remove.
+o.bind("SUPER + N", "Jot", "omarchy-shell shell toggle yordanbuilds.jot '{}'")
+-- <<< jot <<<
+
+-- YouTube Music plugin: Super+Ctrl+Shift+M opens the player popup, and
+-- Super+K expands search while that popup is open. Super+K still opens
+-- the Keybindings menu everywhere else.
+pcall(dofile, os.getenv("HOME") .. "/.config/omarchy/plugins/io.github.itsdotdev.youtube-music/hypr-bindings.lua")
+
+-- Plugin file toggles the player; always open it instead.
+hl.unbind("SUPER + CTRL + SHIFT + M")
+o.bind(
+  "SUPER + CTRL + SHIFT + M",
+  "YouTube Music",
+  "omarchy-shell shell summon io.github.itsdotdev.youtube-music"
+)

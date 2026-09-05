@@ -20,9 +20,10 @@
   "trigger.ha.licht": {"icon":"󰌵","label":"Licht","description":"Wohnzimmer, Leselicht, Schrank, Flur, H6022, Sofatisch an","action":"ha-licht licht"},
   "trigger.ha.leselicht": {"icon":"󰂺","label":"Leselicht","description":"Leselicht umschalten","action":"ha-licht leselicht"},
   "trigger.ha.abdunkeln": {"icon":"󰹏","label":"Abdunkeln","description":"Wohnzimmer und Leselicht aus","action":"ha-licht abdunkeln"},
-  "trigger.ha.tuer": {"icon":"󰠛","label":"Tür öffnen","description":"Haustür öffnen","action":"ha-tuer"},
+  "trigger.ha.tuer": {"icon":"󰠛","label":"Tür öffnen","description":"Haustür öffnen","action":"ha-tuer","aliases":["open door","door"]},
 
-  "vault": {"icon":"󰢁","label":"Passwörter","description":"Bitwarden: Passwort, Nutzername oder TOTP kopieren","action":"xdg-terminal-exec --app-id=TUI.float -e rbw-tui"},
+  "trigger.kill": {"icon":"󰚌","label":"Kill Process","aliases":["kill","processes","ps"],"description":"Fuzzy-find a running process and terminate it (SIGTERM/SIGKILL)","action":"xdg-terminal-exec --app-id=TUI.float -e kill-tui"},
 
   "install.service.1password": {"when":"false"},
+  "install.service.spotify": {"when":"false"}
 }

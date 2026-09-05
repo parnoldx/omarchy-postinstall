@@ -1,0 +1,188 @@
+#!/bin/bash
+# Process killer TUI around ps + fzf.
+#
+# omarchy:summary=Fuzzy-find a running process and terminate it.
+# omarchy:group=menu
+# omarchy:examples=kill-tui
+#
+# Keys: enter = SIGTERM · ctrl-k = SIGKILL · ctrl-a = toggle mine/all
+#       tab = multi-select · ctrl-r = reload · esc = quit
+
+set -uo pipefail
+
+# Processes that take the whole session (or the machine) down with them.
+PROTECTED='^(systemd|Hyprland|quickshell|uwsm|dbus-daemon|dbus-broker|seatd|pipewire|wireplumber|gnome-keyring-d|login|sshd|kill-tui)$'
+
+# Rows must fit the window: fzf h-scrolls long lines and pushes the PID column
+# off the left edge, which makes the whole list unreadable. So every row is cut
+# to the real terminal width and the full command line lives in the preview.
+term_cols() {
+  local c=${FZF_COLUMNS:-}
+  [[ $c =~ ^[0-9]+$ ]] && [[ $c -gt 40 ]] && { echo "$c"; return; }
+  c=$({ stty size </dev/tty; } 2>/dev/null | awk '{print $2}')
+  [[ $c =~ ^[0-9]+$ ]] && [[ $c -gt 40 ]] && { echo "$c"; return; }
+  c=$(tput cols 2>/dev/null)
+  [[ $c =~ ^[0-9]+$ ]] && [[ $c -gt 40 ]] && { echo "$c"; return; }
+  echo 100
+}
+
+# ── list mode ────────────────────────────────────────────────────────────
+# Re-invoked by fzf's reload binding, so it has to stay cheap and pure.
+if [[ ${1:-} == --list ]]; then
+  scope=${2:-mine}
+  cols=$(term_cols)
+
+  # In "mine" scope every row has the same owner, so the column is dead weight.
+  if [[ $scope == mine ]]; then
+    show_user=0
+    overhead=47
+    sort_key=2
+    ps_cmd=(ps -u "$(id -un)" -o pid=,user=,pcpu=,pmem=,etime=,comm=,args=)
+  else
+    show_user=1
+    overhead=57
+    sort_key=3
+    ps_cmd=(ps -eo pid=,user=,pcpu=,pmem=,etime=,comm=,args=)
+  fi
+
+  "${ps_cmd[@]}" |
+    awk -v show_user="$show_user" -v maxargs="$((cols - overhead - 4))" '
+      $1 > 2 {
+        pid = $1; user = $2; cpu = $3; mem = $4; et = $5; comm = $6
+        args = ""
+        for (i = 7; i <= NF; i++) args = args (args == "" ? "" : " ") $i
+
+        # Kernel threads show up as [kworker/...] — never killable, always noise.
+        if (args ~ /^\[.*\]$/) next
+        # The picker and its own pipeline are not interesting targets.
+        if (comm ~ /^(kill-tui|fzf|ps|awk|sort)$/) next
+
+        if (maxargs < 12) args = ""
+        else if (length(args) > maxargs) args = substr(args, 1, maxargs - 2) ".."
+
+        if (show_user)
+          line = sprintf("%6s %-9.9s %4s %4s %9s  %-18.18s %s", pid, user, cpu, mem, et, comm, args)
+        else
+          line = sprintf("%6s %4s %4s %9s  %-18.18s %s", pid, cpu, mem, et, comm, args)
+        sub(/ +$/, "", line)
+        print line
+      }' |
+    sort -k"$sort_key" -rn
+  exit 0
+fi
+
+# ── preview mode ─────────────────────────────────────────────────────────
+if [[ ${1:-} == --preview ]]; then
+  pid=${2:-}
+  ps -o pid,ppid,user,stat,%cpu,%mem,etime,nice,comm -p "$pid" 2>/dev/null ||
+    { echo "process $pid is gone"; exit 0; }
+  echo
+  echo "cmdline:"
+  tr '\0' '\n' <"/proc/$pid/cmdline" 2>/dev/null | sed 's/^/  /'
+  echo "cwd: $(readlink "/proc/$pid/cwd" 2>/dev/null || echo '?')"
+  children=$(pgrep -P "$pid" 2>/dev/null | wc -l)
+  [[ $children -gt 0 ]] && echo "children: $children (killed separately)"
+  exit 0
+fi
+
+# ── main ─────────────────────────────────────────────────────────────────
+command -v fzf >/dev/null || { echo "fzf not installed" >&2; exit 1; }
+
+me=$(id -un)
+
+# Kill as the owner: our own processes need no help, anyone else's needs root.
+send_signal() {
+  local sig=$1 pid=$2 owner=$3
+  if [[ $owner == "$me" ]]; then
+    kill "-$sig" "$pid" 2>/dev/null
+  else
+    sudo kill "-$sig" "$pid" 2>/dev/null
+  fi
+}
+
+# Same shape as omarchy-pkg-remove: keys live in the preview label, not a
+# header, and destructive pickers are red.
+scope=mine
+while true; do
+  fzf_args=(
+    --multi
+    --no-hscroll
+    --expect=ctrl-k,ctrl-a
+    --prompt="kill ($scope) > "
+    --preview 'kill-tui --preview {1}'
+    --preview-label='alt-p: toggle details, alt-j/k: scroll, tab: multi-select, ctrl-a: mine/all, ctrl-k: force kill'
+    --preview-label-pos='bottom'
+    --preview-window 'down:35%:wrap'
+    --bind 'alt-p:toggle-preview'
+    --bind 'alt-d:preview-half-page-down,alt-u:preview-half-page-up'
+    --bind 'alt-k:preview-up,alt-j:preview-down'
+    --bind "ctrl-r:reload(kill-tui --list $scope)"
+    --color 'pointer:red,marker:red'
+  )
+
+  out=$(kill-tui --list "$scope" | fzf "${fzf_args[@]}")
+
+  pressed=$(head -n1 <<<"$out")
+  lines=$(tail -n +2 <<<"$out")
+
+  if [[ $pressed == ctrl-a ]]; then
+    [[ $scope == mine ]] && scope=all || scope=mine
+    continue
+  fi
+
+  [[ -n ${lines//[[:space:]]/} ]] || exit 0
+
+  sig=TERM
+  [[ $pressed == ctrl-k ]] && sig=KILL
+
+  # The owner column only exists in "all" scope; in "mine" scope it is us.
+  if [[ $scope == mine ]]; then
+    selected=$(awk -v u="$me" '{print $1, u}' <<<"$lines")
+    comm_field=5
+  else
+    selected=$(awk '{print $1, $2}' <<<"$lines")
+    comm_field=6
+  fi
+
+  # Anything session-critical gets one explicit confirmation, once, up front.
+  risky=$(awk -v p="$PROTECTED" -v f="$comm_field" '$f ~ p { printf "  %s  %s\n", $1, $f }' <<<"$lines")
+  if [[ -n $risky ]]; then
+    echo "These will take down your session or system:"
+    echo "$risky"
+    read -r -p "Send SIG$sig anyway? [y/N] " answer
+    [[ $answer == [yY] ]] || { echo "Aborted."; exit 0; }
+  fi
+
+  if awk -v u="$me" '$2 != u { found = 1 } END { exit !found }' <<<"$selected"; then
+    source omarchy-sudo-keepalive
+  fi
+
+  killed=() failed=() survived=() pending=()
+  while read -r pid owner; do
+    [[ -n $pid ]] || continue
+    name=$(ps -o comm= -p "$pid" 2>/dev/null || echo "$pid")
+    if send_signal "$sig" "$pid" "$owner"; then
+      killed+=("$name ($pid)")
+      pending+=("$pid:$name")
+    else
+      failed+=("$name ($pid)")
+    fi
+  done <<<"$selected"
+
+  # SIGTERM is a request; give it a moment, then report who ignored it.
+  if [[ $sig == TERM && ${#pending[@]} -gt 0 ]]; then
+    sleep 2
+    for entry in "${pending[@]}"; do
+      kill -0 "${entry%%:*}" 2>/dev/null && survived+=("${entry#*:} (${entry%%:*})")
+    done
+  fi
+
+  msg=""
+  [[ ${#killed[@]} -gt 0 ]] && msg="SIG$sig sent to ${#killed[@]}: $(IFS=', '; echo "${killed[*]}")"
+  [[ ${#failed[@]} -gt 0 ]] && msg+=$'\n'"Failed: $(IFS=', '; echo "${failed[*]}")"
+  [[ ${#survived[@]} -gt 0 ]] && msg+=$'\n'"Still running (ctrl-k to force): $(IFS=', '; echo "${survived[*]}")"
+
+  echo "$msg"
+  omarchy-show-done
+  exit 0
+done
