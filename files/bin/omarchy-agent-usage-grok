@@ -6,8 +6,8 @@
 
 Limits come from cli-chat-proxy /billing?format=credits using the token in
 ~/.grok/auth.json (same endpoint the official Grok TUI /usage screen uses).
-All-time model totals come from ~/.grok/sessions transcripts. Daily token
-bars are omitted — the weekly limit is the number that matters. The agents
+All-time model totals and the last-7-days token chart both come from
+~/.grok/sessions transcripts, bucketed by each turn's timestamp. The agents
 panel only ever reads the JSON this prints.
 """
 
@@ -66,6 +66,11 @@ def date_string(value: dt.date) -> str:
 
 def local_date_string() -> str:
   return date_string(dt.datetime.now().date())
+
+
+def recent_date_strings() -> list[str]:
+  today = dt.datetime.now().date()
+  return [date_string(today - dt.timedelta(days=offset)) for offset in range(6, -1, -1)]
 
 
 def number(value: Any) -> int:
@@ -130,6 +135,8 @@ def write_json(path: Path, payload: Any, mode: int = 0o644) -> None:
 
 def scan_sessions(sessions_path: Path) -> dict[str, Any]:
   today = local_date_string()
+  recent_dates = recent_date_strings()
+  recent = {day: {"date": day, "messageCount": 0} for day in recent_dates}
   sessions: set[str] = set()
   active_days: set[str] = set()
   today_sessions: set[str] = set()
@@ -204,6 +211,10 @@ def scan_sessions(sessions_path: Path) -> dict[str, Any]:
           prompts += 1
           sessions.add(session_id)
           active_days.add(day)
+          if day in recent:
+            # recentDays.messageCount is actually a token total, matching
+            # the other collectors' record contract.
+            recent[day]["messageCount"] += turn_total
           if day == today:
             today_prompt_count += 1
             today_sessions.add(session_id)
@@ -216,7 +227,7 @@ def scan_sessions(sessions_path: Path) -> dict[str, Any]:
     "todaySessions": len(today_sessions),
     "todayTotalTokens": today_token_total,
     "todayTokensByModel": today_tokens,
-    "recentDays": [],
+    "recentDays": [recent[day] for day in recent_dates],
     "totalPrompts": prompts,
     "totalSessions": len(sessions),
     "activeDays": len(active_days),
@@ -365,15 +376,16 @@ def billing_config(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def as_percent(value: Any) -> float:
+  # The billing field is named creditUsagePercent and is 0–100, matching the
+  # TUI. Treating values ≤ 1 as already-normalized fractions made a fresh
+  # window's 1.0 (one percent) render as 100%.
   try:
     n = float(value)
   except (TypeError, ValueError):
     return -1.0
   if n != n or n < 0:
     return -1.0
-  if n > 1:
-    return min(1.0, n / 100.0)
-  return min(1.0, n)
+  return min(1.0, n / 100.0)
 
 
 def period_title(period_type: str) -> str:
@@ -421,6 +433,54 @@ def pool_limits_only(limits: Any) -> list[dict[str, Any]]:
   return kept if kept else items[:1]
 
 
+def limits_from_billing_config(config: dict[str, Any]) -> list[dict[str, Any]]:
+  """Turn a /billing?format=credits config object into panel limit rows.
+
+  A brand-new weekly window omits creditUsagePercent until the first billed
+  request. That is 0% used, not a failed probe — falling back to the previous
+  window's percentage is what left the panel stuck at 92% after reset.
+  """
+  if not isinstance(config, dict):
+    return []
+  period = config.get("currentPeriod") if isinstance(config.get("currentPeriod"), dict) else {}
+  reset_at = normalize_reset_at(period.get("end") or config.get("billingPeriodEnd"))
+  raw_type = period.get("type") if period else ""
+  title = period_title(str(raw_type or ("USAGE_PERIOD_TYPE_WEEKLY" if reset_at else "")))
+  raw = config.get("creditUsagePercent")
+  if raw is None or raw == "":
+    if not period and not reset_at:
+      return []
+    used = 0.0
+  else:
+    used = as_percent(raw)
+  if used < 0 or title == "":
+    return []
+  return [{
+    "label": title + " (7-day)" if title == "Weekly" else title,
+    "title": title,
+    "percent": used,
+    "resetsAt": reset_at,
+  }]
+
+
+def usable_cached_limits(limits: Any, now: dt.datetime | None = None) -> list[dict[str, Any]]:
+  """Keep cached windows that have not yet reset.
+
+  After the weekly roll the probe can fail for other reasons (network, 401).
+  Replaying a window whose resetsAt is already in the past would show last
+  week's 92% as if it were still current.
+  """
+  if now is None:
+    now = dt.datetime.now(dt.timezone.utc)
+  kept = []
+  for item in pool_limits_only(limits):
+    reset = parse_expires_at(str(item.get("resetsAt") or ""))
+    if reset is not None and reset <= now:
+      continue
+    kept.append(item)
+  return kept
+
+
 def probe_limits(token: str, user_id: str) -> dict[str, Any]:
   headers = proxy_headers(token)
   if user_id:
@@ -434,18 +494,7 @@ def probe_limits(token: str, user_id: str) -> dict[str, Any]:
     return {"ok": False, "helpText": "Grok's usage endpoint returned no limits. Local Grok stats are still shown."}
 
   config = billing_config(billing.get("payload") or {})
-  limits: list[dict[str, Any]] = []
-  used = as_percent(config.get("creditUsagePercent"))
-  period = config.get("currentPeriod") if isinstance(config.get("currentPeriod"), dict) else {}
-  reset_at = normalize_reset_at(period.get("end") or config.get("billingPeriodEnd"))
-  title = period_title(str(period.get("type") or "USAGE_PERIOD_TYPE_WEEKLY"))
-  if used >= 0:
-    limits.append({
-      "label": title + " (7-day)" if title == "Weekly" else title,
-      "title": title,
-      "percent": used,
-      "resetsAt": reset_at,
-    })
+  limits = limits_from_billing_config(config)
 
   user = http_json(proxy_base() + "/user?include=subscription", proxy_headers(token))
   payload = user.get("payload") if user.get("ok") else {}
@@ -467,7 +516,7 @@ def collect_limits(auth: dict[str, Any] | None, force: bool) -> dict[str, Any]:
   result = {"limits": [], "usageStatusText": "", "authHelpText": AUTH_HELP, "tierLabel": ""}
   probe_cache = cache_root() / "grok-limits.json"
   cached = read_fresh_json(probe_cache, float("inf")) or {}
-  fallback = pool_limits_only(cached.get("limits") if isinstance(cached.get("limits"), list) else [])
+  fallback = usable_cached_limits(cached.get("limits") if isinstance(cached.get("limits"), list) else [])
   fallback_tier = str(cached.get("tierLabel") or "")
 
   if auth is None:
@@ -538,9 +587,6 @@ def build_record(stats: dict[str, Any], limits: dict[str, Any]) -> dict[str, Any
   if limits.get("retryAdvised"):
     record["retryAdvised"] = True
   record.update(stats)
-  # Never feed the panel a 7-day token chart. Session timestamps don't
-  # bucket Grok usage usefully, and the weekly limit already covers pace.
-  record["recentDays"] = []
   return record
 
 

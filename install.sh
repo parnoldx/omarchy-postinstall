@@ -10,17 +10,19 @@
 # reloads Hyprland / the Omarchy shell. Existing files are backed up first.
 #
 # Included: Hyprland overlays, NeoQwertz keymap, bar plugins, Handy (NVIDIA
-# ICD + GPU keepalive so dictation does not stall ~60s after RTD3), Home
-# Assistant menu + weather, screensaver/about branding, Plymouth/SDDM Om
+# ICD + GPU keepalive so dictation does not stall ~60s after RTD3), Chromium/
+# Edge VAAPI on the Intel iGPU (hybrid NVIDIA decode freezes HTML5 video),
+# Home Assistant menu + weather, screensaver/about branding, Plymouth/SDDM Om
 # unlock logo, default agent pi, VS Code as editor (Omarchy + Files MIME),
-# Grok usage + Thunderbird calendar automation, extra packages.
+# Grok usage + mailbox (CLI, daemon, clock + email bar widgets) +
+# sunrise/sunset nightlight automation, extra packages.
 #
 # CAD Assistant is made usable here twice over: its bundled 2021 Qt5 breaks
 # under Wayland (QT_QPA_PLATFORM=xcb wrapper), and the AppImage's desktop
 # file ships Exec=CADAssistant, which only resolves inside the container.
 #
-# The clock's New Event add-on is built here but installed by hand: it is
-# unsigned, and Thunderbird has no CLI for installing add-ons.
+# mailbox is cloned from github.com/parnoldx/mailbox-cli (override with
+# MAILBOX_SRC) and installed to ~/.local/bin. The daemon is socket-activated.
 
 set -euo pipefail
 
@@ -41,8 +43,8 @@ SKIP_PACKAGES=0
 SKIP_AUR=0
 SKIP_PLYMOUTH=0
 
-# zip only for packing the clock's Thunderbird add-on into an .xpi.
-REPO_PACKAGES=(thunderbird bitwarden bitwarden-cli git-lfs libqalculate zip rbw)
+# go is for building mailbox from source.
+REPO_PACKAGES=(thunderbird bitwarden bitwarden-cli git-lfs libqalculate go rbw)
 AUR_PACKAGES=(cadassistant-appimage handy-bin microsoft-edge-stable-bin visual-studio-code-bin)
 
 usage() {
@@ -68,6 +70,11 @@ Bitwarden vault (optional, prompted if missing):
 
 Shelly door opener (optional, prompted if missing):
   SHELLY_AUTH_KEY  cloud auth_key for ha-tuer
+
+Mailbox (optional):
+  MAILBOX_SRC   existing mailbox-cli checkout; cloned to
+                ~/.local/src/mailbox-cli if unset
+  MAILBOX_REPO  git URL (default https://github.com/parnoldx/mailbox-cli.git)
 EOF
 }
 
@@ -176,24 +183,26 @@ desktop:
 
   Hyprland    scale 1.25, gaps 2/4, rounding 4, NeoQwertz keymap,
               Thunderbird/Herdr overlays, Handy (NVIDIA ICD + dGPU keepalive),
-              Super+J layout toggle
-  Bar         transparent; pa.menu / pa.clock / pa.weather / pa.tray / pa.agents / Handy
-  Clock       month grid dotted in Thunderbird's own calendar colours;
-              right-click a day for the entry pane — type the event in
-              English or German ("lunch with Ana 12:30 till 14:00"), the
-              phrase paints itself as it parses, Create writes the event or
-              task into Thunderbird without taking focus (add-on packed to
-              .xpi here, installed by hand in Thunderbird); plays one nudge
-              sound when a joinable meeting runs a minute without anyone
-              clicking Join
+              Super+J layout toggle, Chromium/Edge VAAPI on Intel iGPU
+  Bar         transparent; pa.menu / mailbox.clock / mailbox.email /
+              pa.weather / pa.tray / pa.agents / Handy
+  Mailbox     CLI + socket-activated daemon; bar clock (calendar popup,
+              natural-language event/task add) and email widget (unread +
+              screener); Super+Shift+Alt+E toggles the mail panel
+  Clock       month grid from the mailbox daemon; right-click a day for the
+              entry pane — type the event in English or German
+              ("lunch with Ana 12:30 till 14:00"); plays one nudge sound
+              when a joinable meeting runs a minute without anyone clicking Join
   HA          launcher Licht/Leselicht/Abdunkeln + room temp / dusk
-  Weather     asks for a German PLZ, stores the wetter.de location URL locally;
+  Weather     asks for a German PLZ, stores the wetter.de URL and coordinates;
               popup shows rain radar only while rain is falling or forecast today
   Branding    screensaver + about
   Plymouth    black/white Om on LUKS unlock and SDDM (sudo, initramfs rebuild)
   Agent       pi (mise global, no agent launch)
   Editor      VS Code (omarchy-launch-editor + Files / xdg-open)
-  Automation  Grok usage collector + Thunderbird calendar sync
+  Nightlight  off at sunrise, on at sunset (from the weather location)
+  Automation  Grok usage collector + mailbox daemon +
+              sunrise/sunset nightlight
   Vault       rbw password TUI (floating terminal): fuzzy-find an entry,
               copy password / username / TOTP; bare `bw` opens it
   Packages    ${REPO_PACKAGES[*]}
@@ -243,7 +252,7 @@ fi
 # --- hyprland ----------------------------------------------------------------
 
 log "Installing Hyprland overlays"
-for f in bindings.lua autostart.lua input.lua looknfeel.lua monitors.lua; do
+for f in hyprland.lua bindings.lua autostart.lua input.lua looknfeel.lua monitors.lua; do
   install_file "$FILES/hypr/$f" "$HOME/.config/hypr/$f"
 done
 
@@ -261,32 +270,44 @@ fi
 log "Installing shell plugins and bar module"
 install_tree "$FILES/omarchy/plugins" "$HOME/.config/omarchy/plugins"
 install_tree "$FILES/omarchy/bar" "$HOME/.config/omarchy/bar"
-chmod 755 \
-  "$HOME/.config/omarchy/plugins/pa.clock/sync-thunderbird-calendar" \
-  "$HOME/.config/omarchy/plugins/pa.clock/focus-thunderbird-calendar" \
-  "$HOME/.config/omarchy/plugins/pa.clock/new-thunderbird-event" \
-  "$HOME/.config/omarchy/plugins/pa.clock/quick-add-thunderbird" \
-  "$HOME/.config/omarchy/plugins/pa.clock/thunderbird-newevent/build" \
-  "$HOME/.config/omarchy/plugins/pa.clock/tests/run" \
-  "$HOME/.config/omarchy/plugins/pa.weather/ha-room-temp"
+chmod 755 "$HOME/.config/omarchy/plugins/pa.weather/ha-room-temp"
 
-# The clock popup's entry pane creates events and tasks in Thunderbird, and a
-# bare date still opens its New Event dialog. Neither is reachable from outside
-# Thunderbird, so both go through the add-on in thunderbird-newevent/, which
-# watches ~/.local/state/omarchy/thunderbird-new-event.json. Packed here;
-# installing it is a manual step below, because Thunderbird takes an unsigned
-# .xpi only through its own UI. Reinstall it after an upgrade — the entry pane
-# needs 1.3.0 or newer.
-newevent_dir="$HOME/.config/omarchy/plugins/pa.clock/thunderbird-newevent"
-newevent_xpi="$HOME/.config/omarchy/plugins/pa.clock/thunderbird-newevent.xpi"
-if command -v zip >/dev/null; then
-  if "$newevent_dir/build" >/dev/null; then
-    log "Built $newevent_xpi"
-  else
-    warn "Could not pack the Thunderbird New Event add-on; run $newevent_dir/build later"
+# pa.clock was the Thunderbird-backed calendar widget. mailbox.clock replaces it.
+if [[ -d $HOME/.config/omarchy/plugins/pa.clock ]]; then
+  log "Removing leftover pa.clock (replaced by mailbox.clock)"
+  rm -rf "$HOME/.config/omarchy/plugins/pa.clock"
+fi
+
+log "Installing mailbox CLI, clock widget, and email widget"
+if [[ -z ${MAILBOX_SRC:-} ]]; then
+  for cand in \
+    "$HOME/.local/src/mailbox-cli" \
+    "$HOME/Work/mailbox-cli" \
+    "$HOME/Work/tries/2026-08-29-mailbox-cli"; do
+    if [[ -d $cand/.git && -f $cand/Makefile ]]; then
+      MAILBOX_SRC=$cand
+      break
+    fi
+  done
+fi
+mailbox_src="${MAILBOX_SRC:-$HOME/.local/src/mailbox-cli}"
+mailbox_repo="${MAILBOX_REPO:-https://github.com/parnoldx/mailbox-cli.git}"
+log "mailbox-cli source: $mailbox_src"
+if [[ ! -d $mailbox_src/.git ]]; then
+  if [[ -e $mailbox_src ]]; then
+    die "MAILBOX_SRC $mailbox_src exists and is not a git checkout"
   fi
-else
-  warn "zip missing; pack the New Event add-on later: $newevent_dir/build"
+  command -v git >/dev/null || die "git is not on PATH; cannot clone mailbox-cli"
+  mkdir -p "$(dirname "$mailbox_src")"
+  run git clone --depth 1 "$mailbox_repo" "$mailbox_src"
+fi
+command -v go >/dev/null || die "go is not on PATH; mailbox CLI cannot be built (install go, or drop --skip-packages)"
+command -v make >/dev/null || die "make is not on PATH; mailbox CLI cannot be built"
+run make -C "$mailbox_src" install
+run make -C "$mailbox_src" install-plugins
+mkdir -p "$HOME/.agents/skills" "$HOME/.claude/skills"
+if ! make -C "$mailbox_src" skill; then
+  warn "mailbox skill not installed; later: make -C $mailbox_src skill"
 fi
 
 if command -v omarchy-shell >/dev/null; then
@@ -330,9 +351,20 @@ install_file "$FILES/bin/handy-ensure-settings" "$HOME/.local/bin/handy-ensure-s
 install_file "$FILES/bin/transcribe" "$HOME/.local/bin/transcribe" 755
 install_file "$FILES/bin/omarchy-agent-usage-grok" "$HOME/.local/bin/omarchy-agent-usage-grok" 755
 install_file "$FILES/bin/wetter-plz-lookup" "$HOME/.local/bin/wetter-plz-lookup" 755
+install_file "$FILES/bin/hyprsunset-solar" "$HOME/.local/bin/hyprsunset-solar" 755
 install_file "$FILES/bin/set-code-mime-defaults" "$HOME/.local/bin/set-code-mime-defaults" 755
 install_file "$FILES/bin/rbw-tui" "$HOME/.local/bin/rbw-tui" 755
 install_file "$FILES/bin/bw" "$HOME/.local/bin/bw" 755
+install_file "$FILES/bin/vault-bridge" "$HOME/.local/bin/vault-bridge" 755
+
+# Shadows /usr/share/applications/bitwarden.desktop so the launcher and
+# search open the same rbw TUI as the Passwörter menu entry, not the
+# Electron desktop app.
+install_file "$FILES/applications/bitwarden.desktop" \
+  "$HOME/.local/share/applications/bitwarden.desktop"
+if command -v update-desktop-database >/dev/null; then
+  update-desktop-database "$HOME/.local/share/applications" >/dev/null 2>&1 || true
+fi
 
 # --- bitwarden / rbw vault ---------------------------------------------------
 
@@ -365,6 +397,16 @@ else
     warn "One-time setup remains: rbw register (API token from Bitwarden web vault → Settings → Security → Keys), then rbw sync"
   else
     warn "No RBW_EMAIL; run 'rbw config' manually later"
+  fi
+fi
+
+if [[ -x $HOME/.local/bin/vault-bridge ]]; then
+  log "Installing vault-bridge (one pinentry unlocks rbw and the Bitwarden extension)"
+  if command -v rbw >/dev/null; then
+    "$HOME/.local/bin/vault-bridge" setup --quiet
+    warn "Bitwarden extension: enable Unlock with biometrics (Settings → Account security). Super+Shift+B then unlocks rbw and the extension together. Do not enable Bitwarden desktop 'Allow browser integration'."
+  else
+    warn "rbw not on PATH; skip vault-bridge setup. Later: vault-bridge setup"
   fi
 fi
 
@@ -451,9 +493,16 @@ if [[ $weather_plz =~ ^[0-9]{5}$ ]]; then
   lookup="$HOME/.local/bin/wetter-plz-lookup"
   [[ -x $lookup ]] || lookup="$FILES/bin/wetter-plz-lookup"
   if weather_hit="$("$lookup" "$weather_plz")"; then
-    weather_url="${weather_hit%%$'\t'*}"
-    weather_title="${weather_hit#*$'\t'}"
+    IFS=$'\t' read -r weather_url weather_title weather_lat weather_lon <<<"$weather_hit"
     log "wetter.de: $weather_title -> $weather_url"
+    if [[ -n ${weather_lat:-} && -n ${weather_lon:-} ]]; then
+      if command -v omarchy-weather-location >/dev/null; then
+        omarchy-weather-location --set "$weather_title" "${weather_lat},${weather_lon}"
+        log "Weather coordinates: $weather_lat,$weather_lon"
+      else
+        warn "omarchy-weather-location missing; nightlight solar times need it"
+      fi
+    fi
     python3 - "$HOME/.config/omarchy/shell.json" "$weather_url" <<'PY'
 import json, sys
 path, url = sys.argv[1], sys.argv[2]
@@ -485,25 +534,50 @@ else
   fi
 fi
 
+# --- mailbox setup -----------------------------------------------------------
+
+log "Mailbox account"
+mailbox_bin="$HOME/.local/bin/mailbox"
+mailbox_config="$HOME/.config/mailbox/config.toml"
+if [[ -f $mailbox_config ]]; then
+  log "mailbox config already present"
+elif [[ -t 0 ]] && (( YES == 0 )) && [[ -x $mailbox_bin ]]; then
+  printf '\nmailbox setup (IMAP + CalDAV + daemon). This is the wizard that writes\n'
+  printf '~/.config/mailbox/config.toml and enables mailbox.socket.\n'
+  "$mailbox_bin" setup || warn "mailbox setup failed; run it later"
+else
+  warn "No mailbox config; run 'mailbox setup' later (writes config + enables the daemon)"
+fi
+
 # --- automation --------------------------------------------------------------
 
 log "Installing hooks and user systemd units"
 run omarchy hook install post-boot "$FILES/omarchy/hooks/post-boot.d/grok-usage.hook"
-run omarchy hook install post-boot "$FILES/omarchy/hooks/post-boot.d/thunderbird-calendar.hook"
+run omarchy hook install post-boot "$FILES/omarchy/hooks/post-boot.d/hyprsunset-solar.hook"
+rm -f "$HOME/.config/omarchy/hooks/post-boot.d/thunderbird-calendar.hook"
 
 install_tree "$FILES/systemd/user" "$HOME/.config/systemd/user"
 if command -v systemctl >/dev/null; then
+  systemctl --user disable --now omarchy-thunderbird-calendar-sync.timer 2>/dev/null || true
+  systemctl --user disable --now omarchy-thunderbird-calendar-sync.service 2>/dev/null || true
+  rm -f "$HOME/.config/systemd/user/omarchy-thunderbird-calendar-sync.timer" \
+    "$HOME/.config/systemd/user/omarchy-thunderbird-calendar-sync.service"
   systemctl --user daemon-reload
-  for unit in omarchy-agent-usage-grok.timer omarchy-agent-usage-grok.path omarchy-thunderbird-calendar-sync.timer handy-gpu-keepalive.service; do
+  for unit in omarchy-agent-usage-grok.timer omarchy-agent-usage-grok.path handy-gpu-keepalive.service hyprsunset-solar.timer hyprsunset-solar-resume.service; do
     systemctl --user enable --now "$unit" || warn "could not enable $unit"
   done
+  if [[ -f $mailbox_config ]]; then
+    systemctl --user enable --now mailbox.socket || warn "could not enable mailbox.socket"
+  else
+    warn "mailbox.socket not enabled yet; mailbox setup does that"
+  fi
   if [[ -x $HOME/.local/bin/handy-ensure-settings ]]; then
     "$HOME/.local/bin/handy-ensure-settings" || warn "could not set Handy never-unload"
   fi
   systemctl --user start omarchy-agent-usage-grok.service ||
     warn "Grok usage collector failed (run grok login later)"
-  systemctl --user start omarchy-thunderbird-calendar-sync.service ||
-    warn "Thunderbird calendar sync failed (needs a configured Thunderbird profile)"
+  systemctl --user start hyprsunset-solar.service ||
+    warn "Nightlight solar times failed (needs weather coordinates)"
 fi
 
 # --- default editor ----------------------------------------------------------
@@ -557,7 +631,8 @@ log "Done. Open a new session or wait for the shell to hot-reload."
 log "Handy dictation: Ctrl+F1 (NVIDIA ICD + dGPU keepalive; model never unloads)."
 log "File transcription: transcribe file.mp4 [-o out.txt]."
 log "Thunderbird overlay: Super+Shift+E. Herdr: Super+Shift+A."
+log "Mailbox panel: Super+Shift+Alt+E. Calendar: Super+Ctrl+D."
 log "Grok usage in the agents panel needs: grok login"
-log "Clock right-click → New Event needs the add-on installed once:"
-log "  Thunderbird → Add-ons and Themes → gear → Install Add-on From File… →"
-log "  $newevent_xpi"
+if [[ ! -f $HOME/.config/mailbox/config.toml ]]; then
+  log "Mailbox still needs: mailbox setup"
+fi

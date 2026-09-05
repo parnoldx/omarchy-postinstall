@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh hyprsunset nightlight indicator after resume
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/hyprsunset-solar watch-resume
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

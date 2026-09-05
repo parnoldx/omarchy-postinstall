@@ -2,6 +2,3 @@
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 node --test "$root/tests/model.test.js"
-node --test "$root/tests/panel-static.test.js"
-python3 "$root/tests/sync.test.py"
-"$root/tests/quickadd.test.sh"

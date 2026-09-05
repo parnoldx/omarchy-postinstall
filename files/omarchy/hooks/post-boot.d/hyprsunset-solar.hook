@@ -1,0 +1,3 @@
+#!/bin/bash
+# Apply today's sunrise/sunset nightlight times after the desktop starts.
+systemctl --user start hyprsunset-solar.service >/dev/null 2>&1 || true

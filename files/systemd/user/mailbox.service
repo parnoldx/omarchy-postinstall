@@ -1,0 +1,18 @@
+[Unit]
+Description=mailbox daemon
+Documentation=man:mailbox(1)
+# Started by the socket, not by the session: the first widget to connect is
+# what brings it up.
+Requires=mailbox.socket
+After=mailbox.socket
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/mailbox daemon --systemd-socket
+# --systemd-socket is an assertion. Without it a misconfigured unit would bind
+# a second socket, look healthy, and be talked to by nobody.
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=default.target

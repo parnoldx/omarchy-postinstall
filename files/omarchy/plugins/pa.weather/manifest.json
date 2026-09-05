@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "pa.weather",
-  "name": "My Weather",
+  "name": "PA Weather",
   "version": "1.0.0",
   "author": "Omarchy",
   "description": "Weather pill with detail popup and a rain radar while precipitation is falling",
@@ -12,7 +12,7 @@
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
-    "displayName": "My Weather",
+    "displayName": "PA Weather",
     "description": "Weather pill with outdoor temperature, room reading, and rain radar while precipitation is falling",
     "category": "Info",
     "allowMultiple": false,

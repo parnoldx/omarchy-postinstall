@@ -145,6 +145,7 @@ Panel {
   readonly property var current: (hasConfiguredCoordinates && openMeteoCurrent) ? openMeteoCurrent : ((report && report.current_condition && report.current_condition[0]) ? report.current_condition[0] : openMeteoCurrent)
   readonly property var areaInfo: report && report.nearest_area && report.nearest_area[0] ? report.nearest_area[0] : null
   readonly property var forecastDays: buildForecastDays()
+  readonly property var hourlyForecast: Model.buildHourlyForecast(dailyForecastReport, now, 1, 12)
   readonly property string reportCountry: areaInfo && areaInfo.country && areaInfo.country[0] ? areaInfo.country[0].value : ""
 
   readonly property bool useImperial: Model.shouldUseImperial(setting("unit", ""), Qt.locale().name, reportCountry)
@@ -231,7 +232,8 @@ Panel {
     var url = "https://api.open-meteo.com/v1/forecast"
       + "?latitude=" + encodeURIComponent(String(lat))
       + "&longitude=" + encodeURIComponent(String(lon))
-      + "&daily=weather_code,temperature_2m_max,temperature_2m_min"
+      + "&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset"
+      + "&hourly=temperature_2m,weather_code,is_day"
       + "&current=temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code,is_day,precipitation"
       + "&forecast_days=4"
       + "&timezone=auto"
@@ -335,6 +337,10 @@ Panel {
     return Model.buildForecastDays(report, dailyForecastReport, Qt.formatDate(new Date(), "yyyy-MM-dd"))
   }
 
+  function buildHourlyForecast() {
+    return Model.buildHourlyForecast(dailyForecastReport, now, 1, 12)
+  }
+
   function openMeteoForecastDays() {
     return Model.openMeteoForecastDays(dailyForecastReport, Qt.formatDate(new Date(), "yyyy-MM-dd"))
   }
@@ -366,6 +372,10 @@ Panel {
   // Bare degree value (no unit letter), used in the forecast row.
   function bareTempForDay(day, kind) {
     return Model.bareTempForDay(day, kind, useImperial)
+  }
+
+  function bareTempForHour(hour) {
+    return Model.bareTempForHour(hour, useImperial)
   }
 
   // Representative icon for a forecast day: the hourly entry nearest noon.
@@ -552,8 +562,9 @@ Panel {
   Timer {
     id: countdownTimer
     interval: 30 * 1000
-    running: root.duskState !== null
+    running: true
     repeat: true
+    triggeredOnStart: true
     onTriggered: root.now = new Date()
   }
 
@@ -878,6 +889,56 @@ Panel {
         font.family: root.bar.fontFamily
         font.pixelSize: Style.font.bodySmall
         font.italic: true
+      }
+
+      // ---- Upcoming hours: time, condition (or sunrise/sunset), temperature.
+      Item {
+        visible: root.hourlyForecast.length > 0
+        width: parent.width
+        height: hourlyRow.height
+
+        Row {
+          id: hourlyRow
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.leftMargin: Style.space(12)
+          anchors.rightMargin: Style.space(12)
+
+          Repeater {
+            model: root.hourlyForecast
+
+            Column {
+              required property var modelData
+              width: hourlyRow.width / Math.max(1, root.hourlyForecast.length)
+              spacing: Style.space(2)
+
+              Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: modelData.timeLabel
+                color: Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                font.letterSpacing: 0.5
+              }
+
+              Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: Model.hourlySlotIcon(modelData)
+                color: root.bar.foreground
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.title
+              }
+
+              Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: root.bareTempForHour(modelData)
+                color: root.bar.foreground
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.body
+              }
+            }
+          }
+        }
       }
 
       // ---- Divider between current conditions and forecast.

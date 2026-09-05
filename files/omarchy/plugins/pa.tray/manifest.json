@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "pa.tray",
-  "name": "My System tray",
+  "name": "PA System tray",
   "version": "1.0.0",
   "author": "Omarchy",
   "description": "Status notifier items",
@@ -12,7 +12,7 @@
     "barWidget": "Tray.qml"
   },
   "barWidget": {
-    "displayName": "My System tray",
+    "displayName": "PA System tray",
     "description": "Status notifier items",
     "category": "Status",
     "allowMultiple": false

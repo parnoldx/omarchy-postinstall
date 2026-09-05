@@ -1,6 +1,11 @@
 -- Extra autostart processes.
 -- o.launch_on_start("my-service")
 
+-- Night light: hyprsunset-solar writes sunrise/sunset profiles into
+-- ~/.config/hypr/hyprsunset.conf. The daemon has to stay running for those
+-- switches to fire.
+o.launch_on_start("hyprsunset")
+
 -- Handy dictation daemon (hidden; hotkeys via Hyprland bindings).
 -- handy-daemon pins the NVIDIA Vulkan ICD and keeps the dGPU in D0 so
 -- model reload does not stall ~60s after fine-grained RTD3.

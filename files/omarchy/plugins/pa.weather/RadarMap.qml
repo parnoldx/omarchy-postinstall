@@ -35,6 +35,12 @@ Item {
   readonly property bool smoothTiles: true
   readonly property bool showSnow: true
 
+  // CARTO raster tiles now watermark unless ?key= is present. The key lives
+  // in ~/.config/carto/api_key, not in this plugin, so it is not copied into
+  // the public postinstall tree.
+  property string cartoApiKey: ""
+  property int basemapRevision: 0
+
   property real viewLatitude: 0
   property real viewLongitude: 0
   property int zoom: 9
@@ -128,7 +134,27 @@ Item {
 
   function basemapTileUrl(z, x, y) {
     if (!shown) return ""
-    return "https://basemaps.cartocdn.com/" + basemapStyle + "/" + z + "/" + x + "/" + y + ".png"
+    var url = "https://basemaps.cartocdn.com/" + basemapStyle + "/" + z + "/" + x + "/" + y + ".png"
+    if (cartoApiKey !== "") url += "?key=" + encodeURIComponent(cartoApiKey)
+    return url
+  }
+
+  FileView {
+    path: Quickshell.env("HOME") + "/.config/carto/api_key"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: {
+      var next = String(text() || "").replace(/^\s+|\s+$/g, "")
+      if (next === root.cartoApiKey) return
+      root.cartoApiKey = next
+      root.basemapRevision++
+    }
+    onLoadFailed: {
+      if (root.cartoApiKey === "") return
+      root.cartoApiKey = ""
+      root.basemapRevision++
+    }
   }
 
   function radarTileUrlA(z, x, y) { return radarTileUrlForFrame(frameA, z, x, y) }
@@ -198,6 +224,7 @@ Item {
           centerLongitude: root.viewLongitude
           zoom: root.zoom
           tileUrlFor: root.basemapTileUrl
+          revision: root.basemapRevision
         }
 
         TileLayer {

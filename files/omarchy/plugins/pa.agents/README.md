@@ -59,10 +59,11 @@ instead of off a single selection.
 
 `root.dailyChartHiddenProviderIds` in `Panel.qml` (currently `["claude"]`) is
 a personal display preference: the listed provider's `recentDays` data is
-left untouched on disk (unlike Grok's collector, which never fills
-`recentDays` at all because the data wouldn't be meaningful), it's just not
-rendered. Add or remove a provider id there to change which agents' daily
-charts show.
+left untouched on disk, it's just not rendered in that provider's own
+stacked section. Add or remove a provider id there to change which agents'
+daily charts show. The Expand button's combined trend chart ignores this
+list — it plots every provider with data, since that's a comparison across
+subscriptions rather than any one provider's own chart.
 
 ## Data
 

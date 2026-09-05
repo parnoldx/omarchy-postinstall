@@ -1,0 +1,946 @@
+#!/usr/bin/env python3
+"""One master-password prompt unlocks rbw and the Bitwarden browser extension.
+
+The Chrome extension will not accept rbw's session. It will, however, accept
+the vault UserKey over the same native-messaging protocol the official desktop
+app uses for biometric unlock. This process:
+
+  * sits in as rbw's pinentry so the password is entered once
+  * derives the UserKey from rbw's local cache (same KDF as Bitwarden)
+  * answers the extension's biometric-unlock request with that key
+
+The master password is never written to disk. The UserKey lives only in the
+agent's memory until lock / logout / reboot.
+
+One binary: rbw pinentry and the Chrome native-messaging host both exec
+vault-bridge (detected from argv). Subcommands: agent, pinentry, host,
+unlock, lock, status, setup, selftest.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import json
+import os
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from ctypes import (
+    CDLL,
+    POINTER,
+    byref,
+    c_char_p,
+    c_int,
+    c_void_p,
+    create_string_buffer,
+)
+from pathlib import Path
+
+NAME = "vault-bridge"
+RUNTIME = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}") / NAME
+SOCK_PATH = RUNTIME / "agent.sock"
+PID_PATH = RUNTIME / "agent.pid"
+RBW_CONFIG = Path.home() / ".config" / "rbw" / "config.json"
+RBW_CACHE_DIR = Path.home() / ".cache" / "rbw"
+REAL_PINENTRY = os.environ.get("VAULT_BRIDGE_PINENTRY") or "/usr/bin/pinentry"
+BRIDGE_BIN = Path.home() / ".local" / "bin" / "vault-bridge"
+# Leftovers from when pinentry and the native host were separate wrappers.
+OLD_WRAPPERS = (
+    Path.home() / ".local" / "bin" / "vault-pinentry",
+    Path.home() / ".local" / "bin" / "vault-bitwarden-host",
+)
+COMMANDS = (
+    "agent",
+    "pinentry",
+    "host",
+    "setup",
+    "status",
+    "unlock",
+    "lock",
+    "selftest",
+)
+
+BITWARDEN_ORIGINS = [
+    "chrome-extension://nngceckbapebfimnlniiiahkandclblb/",
+    "chrome-extension://hccnnhgbibccigepcmlgppchkpfdophk/",
+    "chrome-extension://jbkfoedolllekgbhcbcoahefnbanhhlh/",
+    "chrome-extension://ccnckbpmaceehanjmeomladnmlffdjgn/",
+]
+
+NATIVE_HOST_DIRS = [
+    Path.home() / ".config" / "chromium" / "NativeMessagingHosts",
+    Path.home() / ".config" / "google-chrome" / "NativeMessagingHosts",
+    Path.home() / ".config" / "microsoft-edge" / "NativeMessagingHosts",
+    Path.home() / ".config" / "BraveSoftware" / "Brave-Browser" / "NativeMessagingHosts",
+    Path.home() / ".config" / "BraveSoftware" / "Brave-Origin" / "NativeMessagingHosts",
+    Path.home() / ".config" / "BraveSoftware" / "Brave-Origin-Beta" / "NativeMessagingHosts",
+]
+
+# Bitwarden BiometricsStatus
+BIO_AVAILABLE = 0
+BIO_UNLOCK_NEEDED = 1
+MESSAGE_MAX_AGE_MS = 10_000
+
+
+# ---------------------------------------------------------------------------
+# tiny helpers
+# ---------------------------------------------------------------------------
+
+def log(msg: str) -> None:
+    sys.stderr.write(f"{NAME}: {msg}\n")
+    sys.stderr.flush()
+
+
+def b64decode(data: str) -> bytes:
+    pad = "=" * ((4 - len(data) % 4) % 4)
+    return base64.b64decode(data + pad)
+
+
+def b64encode(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
+
+
+def jwt_payload(token: str) -> dict:
+    part = token.split(".")[1]
+    return json.loads(b64decode(part.replace("-", "+").replace("_", "/")))
+
+
+def percent_decode(text: str) -> str:
+    out = []
+    i = 0
+    while i < len(text):
+        if text[i] == "%" and i + 2 < len(text):
+            out.append(chr(int(text[i + 1 : i + 3], 16)))
+            i += 3
+        else:
+            out.append(text[i])
+            i += 1
+    return "".join(out)
+
+
+def percent_encode(text: str) -> str:
+    out = []
+    for ch in text:
+        o = ord(ch)
+        if ch in "%\r\n" or o < 32 or o > 126:
+            out.append(f"%{o:02X}")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def load_rbw_config() -> dict:
+    return json.loads(RBW_CONFIG.read_text())
+
+
+def load_rbw_cache() -> dict:
+    matches = sorted(RBW_CACHE_DIR.glob("*.json"))
+    if not matches:
+        raise FileNotFoundError("no rbw cache; run: rbw sync")
+    return json.loads(matches[-1].read_text())
+
+
+def ensure_gui_env() -> None:
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
+    os.environ.setdefault("XDG_RUNTIME_DIR", str(runtime))
+    if os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY"):
+        return
+    for name in ("wayland-1", "wayland-0"):
+        if (runtime / name).exists():
+            os.environ["WAYLAND_DISPLAY"] = name
+            break
+    dbus = runtime / "bus"
+    if "DBUS_SESSION_BUS_ADDRESS" not in os.environ and dbus.exists():
+        os.environ["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={dbus}"
+
+
+def rbw_is_unlocked() -> bool:
+    try:
+        return subprocess.run(["rbw", "unlocked"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    except OSError:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# crypto: PBKDF2 + HKDF + AES-256-CBC via libcrypto + EncString type 2
+# ---------------------------------------------------------------------------
+
+def hkdf_expand(prk: bytes, info: bytes, length: int) -> bytes:
+    hash_len = 32
+    n = (length + hash_len - 1) // hash_len
+    t = b""
+    okm = b""
+    for i in range(1, n + 1):
+        t = hmac.new(prk, t + info + bytes([i]), hashlib.sha256).digest()
+        okm += t
+    return okm[:length]
+
+
+def stretch_master_key(master_key: bytes) -> tuple[bytes, bytes]:
+    return hkdf_expand(master_key, b"enc", 32), hkdf_expand(master_key, b"mac", 32)
+
+
+def derive_master_key(password: str, email: str, cache: dict) -> bytes:
+    kdf = str(cache.get("kdf", "0"))
+    if kdf not in ("0", "Pbkdf2Sha256"):
+        raise RuntimeError(f"unsupported KDF {kdf!r} (only PBKDF2 is wired)")
+    iterations = int(cache.get("iterations") or 600000)
+    salt = email.strip().lower().encode("utf-8")
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations, dklen=32)
+
+
+class _AES:
+    """AES-256-CBC with PKCS#7 via OpenSSL libcrypto. Key never appears in argv."""
+
+    def __init__(self) -> None:
+        lib = CDLL("libcrypto.so.3")
+        self._lib = lib
+        lib.EVP_aes_256_cbc.restype = c_void_p
+        lib.EVP_CIPHER_CTX_new.restype = c_void_p
+        lib.EVP_CIPHER_CTX_free.argtypes = [c_void_p]
+        lib.EVP_EncryptInit_ex.argtypes = [c_void_p, c_void_p, c_void_p, c_char_p, c_char_p]
+        lib.EVP_EncryptInit_ex.restype = c_int
+        lib.EVP_EncryptUpdate.argtypes = [c_void_p, c_void_p, POINTER(c_int), c_char_p, c_int]
+        lib.EVP_EncryptUpdate.restype = c_int
+        lib.EVP_EncryptFinal_ex.argtypes = [c_void_p, c_void_p, POINTER(c_int)]
+        lib.EVP_EncryptFinal_ex.restype = c_int
+        lib.EVP_DecryptInit_ex.argtypes = [c_void_p, c_void_p, c_void_p, c_char_p, c_char_p]
+        lib.EVP_DecryptInit_ex.restype = c_int
+        lib.EVP_DecryptUpdate.argtypes = [c_void_p, c_void_p, POINTER(c_int), c_char_p, c_int]
+        lib.EVP_DecryptUpdate.restype = c_int
+        lib.EVP_DecryptFinal_ex.argtypes = [c_void_p, c_void_p, POINTER(c_int)]
+        lib.EVP_DecryptFinal_ex.restype = c_int
+        self._cipher = lib.EVP_aes_256_cbc()
+        if not self._cipher:
+            raise RuntimeError("EVP_aes_256_cbc unavailable")
+
+    def _crypt(self, encrypt: bool, key: bytes, iv: bytes, data: bytes) -> bytes:
+        if len(key) != 32 or len(iv) != 16:
+            raise ValueError("AES-256-CBC needs 32-byte key and 16-byte IV")
+        lib = self._lib
+        ctx = lib.EVP_CIPHER_CTX_new()
+        if not ctx:
+            raise RuntimeError("EVP_CIPHER_CTX_new failed")
+        try:
+            init = lib.EVP_EncryptInit_ex if encrypt else lib.EVP_DecryptInit_ex
+            update = lib.EVP_EncryptUpdate if encrypt else lib.EVP_DecryptUpdate
+            final = lib.EVP_EncryptFinal_ex if encrypt else lib.EVP_DecryptFinal_ex
+            if init(ctx, self._cipher, None, key, iv) != 1:
+                raise RuntimeError("EVP init failed")
+            out = create_string_buffer(len(data) + 32)
+            outlen = c_int(0)
+            if update(ctx, out, byref(outlen), data, len(data)) != 1:
+                raise RuntimeError("EVP update failed")
+            total = outlen.value
+            finlen = c_int(0)
+            if final(ctx, byref(out, total), byref(finlen)) != 1:
+                raise RuntimeError("EVP final failed (bad padding or key)")
+            return out.raw[: total + finlen.value]
+        finally:
+            lib.EVP_CIPHER_CTX_free(ctx)
+
+    def encrypt(self, key: bytes, iv: bytes, plaintext: bytes) -> bytes:
+        return self._crypt(True, key, iv, plaintext)
+
+    def decrypt(self, key: bytes, iv: bytes, ciphertext: bytes) -> bytes:
+        return self._crypt(False, key, iv, ciphertext)
+
+
+_AES_SINGLETON: _AES | None = None
+
+
+def aes() -> _AES:
+    global _AES_SINGLETON
+    if _AES_SINGLETON is None:
+        _AES_SINGLETON = _AES()
+    return _AES_SINGLETON
+
+
+def encstring_decrypt(enc: str, enc_key: bytes, mac_key: bytes) -> bytes:
+    kind, rest = enc.split(".", 1)
+    if kind not in ("2", "0"):
+        raise RuntimeError(f"unsupported EncString type {kind}")
+    parts = rest.split("|")
+    iv = b64decode(parts[0])
+    ct = b64decode(parts[1])
+    if kind == "2":
+        if len(parts) < 3:
+            raise RuntimeError("EncString type 2 missing MAC")
+        mac = b64decode(parts[2])
+        expected = hmac.new(mac_key, iv + ct, hashlib.sha256).digest()
+        if not hmac.compare_digest(mac, expected):
+            raise RuntimeError("incorrect master password")
+    return aes().decrypt(enc_key, iv, ct)
+
+
+def encstring_encrypt(plaintext: bytes, enc_key: bytes, mac_key: bytes) -> dict:
+    iv = os.urandom(16)
+    ct = aes().encrypt(enc_key, iv, plaintext)
+    mac = hmac.new(mac_key, iv + ct, hashlib.sha256).digest()
+    iv_b64, ct_b64, mac_b64 = b64encode(iv), b64encode(ct), b64encode(mac)
+    return {
+        "encryptionType": 2,
+        "iv": iv_b64,
+        "data": ct_b64,
+        "mac": mac_b64,
+        "encryptedString": f"2.{iv_b64}|{ct_b64}|{mac_b64}",
+    }
+
+
+def decrypt_user_key(password: str) -> tuple[str, str]:
+    """Return (user_id, user_key_b64) or raise on wrong password / missing cache."""
+    cfg = load_rbw_config()
+    cache = load_rbw_cache()
+    email = cfg.get("email") or jwt_payload(cache["access_token"]).get("email")
+    if not email:
+        raise RuntimeError("rbw email not configured")
+    master = derive_master_key(password, email, cache)
+    enc_key, mac_key = stretch_master_key(master)
+    user_key = encstring_decrypt(cache["protected_key"], enc_key, mac_key)
+    user_id = jwt_payload(cache["access_token"])["sub"]
+    return user_id, b64encode(user_key)
+
+
+def rsa_oaep_sha1_encrypt(spki_der: bytes, plaintext: bytes) -> bytes:
+    with tempfile.TemporaryDirectory(prefix="vault-bridge-") as tmp:
+        der = Path(tmp) / "pub.der"
+        pem = Path(tmp) / "pub.pem"
+        der.write_bytes(spki_der)
+        subprocess.run(
+            ["openssl", "pkey", "-pubin", "-inform", "DER", "-in", str(der), "-outform", "PEM", "-out", str(pem)],
+            check=True,
+            capture_output=True,
+        )
+        proc = subprocess.run(
+            [
+                "openssl",
+                "pkeyutl",
+                "-encrypt",
+                "-pubin",
+                "-inkey",
+                str(pem),
+                "-pkeyopt",
+                "rsa_padding_mode:oaep",
+                "-pkeyopt",
+                "rsa_oaep_md:sha1",
+                "-pkeyopt",
+                "rsa_mgf1_md:sha1",
+            ],
+            input=plaintext,
+            capture_output=True,
+            check=True,
+        )
+        return proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# agent (holds UserKey in memory)
+# ---------------------------------------------------------------------------
+
+class AgentState:
+    def __init__(self) -> None:
+        self._mu = threading.Lock()
+        self.user_id: str | None = None
+        self.user_key_b64: str | None = None
+
+    def unlock(self, password: str) -> dict:
+        user_id, user_key_b64 = decrypt_user_key(password)
+        with self._mu:
+            self.user_id = user_id
+            self.user_key_b64 = user_key_b64
+        return {"ok": True, "user_id": user_id}
+
+    def clear(self) -> dict:
+        with self._mu:
+            self.user_id = None
+            self.user_key_b64 = None
+        return {"ok": True}
+
+    def status(self) -> dict:
+        with self._mu:
+            return {
+                "ok": True,
+                "unlocked": self.user_key_b64 is not None,
+                "user_id": self.user_id,
+            }
+
+    def get_user_key(self) -> dict:
+        st = self.status()
+        if not st["unlocked"]:
+            return {"ok": False, "locked": True}
+        with self._mu:
+            return {
+                "ok": True,
+                "user_id": self.user_id,
+                "user_key_b64": self.user_key_b64,
+            }
+
+
+def _recv_json_line(conn: socket.socket) -> dict | None:
+    buf = b""
+    while b"\n" not in buf:
+        chunk = conn.recv(4096)
+        if not chunk:
+            return None
+        buf += chunk
+        if len(buf) > 1_000_000:
+            raise RuntimeError("agent request too large")
+    line, _sep, _rest = buf.partition(b"\n")
+    return json.loads(line.decode("utf-8"))
+
+
+def _send_json_line(conn: socket.socket, payload: dict) -> None:
+    conn.sendall((json.dumps(payload) + "\n").encode("utf-8"))
+
+
+def run_agent() -> int:
+    RUNTIME.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if SOCK_PATH.exists():
+        SOCK_PATH.unlink()
+    PID_PATH.write_text(str(os.getpid()))
+    state = AgentState()
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.bind(str(SOCK_PATH))
+    os.chmod(SOCK_PATH, 0o600)
+    sock.listen(8)
+    log("agent listening")
+    try:
+        while True:
+            conn, _addr = sock.accept()
+            with conn:
+                try:
+                    req = _recv_json_line(conn)
+                    if not req:
+                        continue
+                    op = req.get("op")
+                    if op == "unlock":
+                        try:
+                            resp = state.unlock(req.get("password") or "")
+                        except Exception as exc:
+                            resp = {"ok": False, "error": str(exc)}
+                    elif op == "lock":
+                        resp = state.clear()
+                    elif op == "status":
+                        resp = state.status()
+                    elif op == "get_user_key":
+                        resp = state.get_user_key()
+                    elif op == "ping":
+                        resp = {"ok": True}
+                    else:
+                        resp = {"ok": False, "error": f"unknown op {op!r}"}
+                    _send_json_line(conn, resp)
+                except Exception as exc:
+                    try:
+                        _send_json_line(conn, {"ok": False, "error": str(exc)})
+                    except OSError:
+                        pass
+    finally:
+        sock.close()
+        SOCK_PATH.unlink(missing_ok=True)
+        PID_PATH.unlink(missing_ok=True)
+    return 0
+
+
+def agent_call(payload: dict, timeout: float = 30.0) -> dict:
+    ensure_agent()
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    sock.connect(str(SOCK_PATH))
+    try:
+        _send_json_line(sock, payload)
+        resp = _recv_json_line(sock)
+        if resp is None:
+            raise RuntimeError("agent closed the connection")
+        return resp
+    finally:
+        sock.close()
+
+
+def agent_alive() -> bool:
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(0.4)
+        sock.connect(str(SOCK_PATH))
+        _send_json_line(sock, {"op": "ping"})
+        resp = _recv_json_line(sock)
+        sock.close()
+        return bool(resp and resp.get("ok"))
+    except OSError:
+        return False
+
+
+def ensure_agent() -> None:
+    if agent_alive():
+        return
+    RUNTIME.mkdir(mode=0o700, parents=True, exist_ok=True)
+    script = Path(__file__).resolve()
+    subprocess.Popen(
+        [sys.executable, str(script), "agent"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
+    for _ in range(50):
+        if agent_alive():
+            return
+        time.sleep(0.05)
+    raise RuntimeError("vault-bridge agent failed to start")
+
+
+# ---------------------------------------------------------------------------
+# pinentry (Assuan) — prompt once, feed rbw, stash UserKey
+# ---------------------------------------------------------------------------
+
+def _pinentry_read_ok(proc: subprocess.Popen) -> str:
+    assert proc.stdout is not None
+    lines = []
+    while True:
+        line = proc.stdout.readline()
+        if not line:
+            raise RuntimeError("pinentry closed")
+        line = line.rstrip("\r\n")
+        if line.startswith("D "):
+            lines.append(line)
+            continue
+        if line.startswith("OK"):
+            return "\n".join(lines)
+        if line.startswith("ERR"):
+            raise RuntimeError(line)
+        # ignore comments / S lines
+
+
+def ask_real_pinentry(title: str, prompt: str, desc: str, error: str | None, extra_args: list[str]) -> str:
+    proc = subprocess.Popen(
+        [REAL_PINENTRY, *extra_args],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    assert proc.stdin is not None and proc.stdout is not None
+    try:
+        _pinentry_read_ok(proc)
+
+        def send(cmd: str) -> str:
+            proc.stdin.write(cmd + "\n")
+            proc.stdin.flush()
+            return _pinentry_read_ok(proc)
+
+        send(f"SETTITLE {title or 'Bitwarden'}")
+        send(f"SETPROMPT {prompt or 'Master Password'}")
+        if desc:
+            send(f"SETDESC {desc}")
+        if error:
+            send(f"SETERROR {error}")
+        data = send("GETPIN")
+        send("BYE")
+        for line in data.splitlines():
+            if line.startswith("D "):
+                return percent_decode(line[2:])
+        raise RuntimeError("pinentry returned no passphrase")
+    finally:
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+        proc.wait(timeout=5)
+
+
+def run_pinentry(argv: list[str]) -> int:
+    ensure_gui_env()
+    extra = argv[:]
+    state = {
+        "title": "Bitwarden",
+        "prompt": "Master Password:",
+        "desc": "Unlock the vault for rbw and the browser extension.",
+        "error": None,
+    }
+    sys.stdout.write("OK Pleased to meet you\n")
+    sys.stdout.flush()
+    for raw in sys.stdin:
+        line = raw.rstrip("\r\n")
+        if not line:
+            continue
+        cmd, _, arg = line.partition(" ")
+        cmd = cmd.upper()
+        if cmd in ("SETTITLE", "SETPROMPT", "SETDESC"):
+            key = {"SETTITLE": "title", "SETPROMPT": "prompt", "SETDESC": "desc"}[cmd]
+            state[key] = arg
+            sys.stdout.write("OK\n")
+        elif cmd == "SETERROR":
+            state["error"] = arg
+            sys.stdout.write("OK\n")
+        elif cmd in ("OPTION", "SETKEYINFO", "GETINFO", "CONFIRM"):
+            sys.stdout.write("OK\n")
+        elif cmd == "GETPIN":
+            try:
+                password = ask_real_pinentry(
+                    state["title"], state["prompt"], state["desc"], state["error"], extra
+                )
+            except RuntimeError as exc:
+                msg = str(exc)
+                if msg.startswith("ERR"):
+                    sys.stdout.write(msg + "\n")
+                else:
+                    sys.stdout.write("ERR 83886179 Operation cancelled\n")
+                sys.stdout.flush()
+                continue
+            try:
+                agent_call({"op": "unlock", "password": password}, timeout=60.0)
+            except Exception as exc:
+                log(f"agent unlock failed: {exc}")
+            sys.stdout.write(f"D {percent_encode(password)}\nOK\n")
+            password = ""
+        elif cmd == "BYE":
+            sys.stdout.write("OK\n")
+            sys.stdout.flush()
+            return 0
+        else:
+            sys.stdout.write("OK\n")
+        sys.stdout.flush()
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# native messaging host (Chrome Bitwarden extension)
+# ---------------------------------------------------------------------------
+
+def native_read() -> dict | None:
+    header = sys.stdin.buffer.read(4)
+    if not header or len(header) < 4:
+        return None
+    (length,) = struct.unpack("<I", header)
+    if length > 8_000_000:
+        raise RuntimeError("native message too large")
+    blob = sys.stdin.buffer.read(length)
+    if len(blob) < length:
+        return None
+    return json.loads(blob.decode("utf-8"))
+
+
+def native_write(payload: dict) -> None:
+    blob = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    sys.stdout.buffer.write(struct.pack("<I", len(blob)))
+    sys.stdout.buffer.write(blob)
+    sys.stdout.buffer.flush()
+
+
+def encstring_from_message(message: dict) -> str:
+    if "encryptedString" in message and message["encryptedString"]:
+        return message["encryptedString"]
+    return f"2.{message['iv']}|{message['data']}|{message['mac']}"
+
+
+def agent_unlocked() -> bool:
+    try:
+        return bool(agent_call({"op": "status"}).get("unlocked"))
+    except Exception:
+        return False
+
+
+def handle_payload(payload: dict, enc_key: bytes, mac_key: bytes) -> dict:
+    command = payload.get("command")
+    message_id = payload.get("messageId")
+    now = int(time.time() * 1000)
+    base = {"command": command, "messageId": message_id, "timestamp": now}
+
+    # One-way only: never prompt from the extension. The rbw wrapper's pinentry
+    # is the single password entry; we just hand the already-derived key over.
+    if command in ("getBiometricsStatus", "getBiometricsStatusForUser"):
+        return {**base, "response": BIO_AVAILABLE}
+    if command == "canEnableBiometricUnlock":
+        return {**base, "response": True}
+    if command == "authenticateWithBiometrics":
+        return {**base, "response": agent_unlocked()}
+    if command in ("unlockWithBiometricsForUser", "biometricUnlock"):
+        try:
+            keyinfo = agent_call({"op": "get_user_key"})
+        except Exception as exc:
+            log(f"unlock failed: {exc}")
+            keyinfo = {"ok": False}
+        if not keyinfo.get("ok"):
+            if command == "biometricUnlock":
+                return {**base, "response": "canceled"}
+            return {**base, "response": False}
+        wanted = payload.get("userId")
+        if wanted and keyinfo.get("user_id") and wanted != keyinfo["user_id"]:
+            return {**base, "response": False}
+        if command == "biometricUnlock":
+            return {
+                **base,
+                "response": "unlocked",
+                "keyB64": keyinfo["user_key_b64"],
+            }
+        return {
+            **base,
+            "response": True,
+            "userKeyB64": keyinfo["user_key_b64"],
+            "keyB64": keyinfo["user_key_b64"],
+        }
+    log(f"unknown native command {command!r}")
+    return {**base, "response": False}
+
+
+def run_host() -> int:
+    ensure_gui_env()
+    native_write({"command": "connected"})
+    channels: dict[str, tuple[bytes, bytes]] = {}
+    while True:
+        outer = native_read()
+        if outer is None:
+            return 0
+        app_id = outer.get("appId") or ""
+        raw = outer.get("message")
+        if not isinstance(raw, dict):
+            continue
+        if raw.get("command") == "setupEncryption":
+            public_key = b64decode(raw["publicKey"])
+            secret = os.urandom(64)
+            enc_key, mac_key = secret[:32], secret[32:]
+            try:
+                wrapped = rsa_oaep_sha1_encrypt(public_key, secret)
+            except subprocess.CalledProcessError as exc:
+                log(f"setupEncryption rsa failed: {exc.stderr!r}")
+                native_write({"command": "invalidateEncryption", "appId": app_id})
+                continue
+            channels[app_id] = (enc_key, mac_key)
+            native_write(
+                {
+                    "command": "setupEncryption",
+                    "appId": app_id,
+                    "messageId": -1,
+                    "sharedSecret": b64encode(wrapped),
+                }
+            )
+            continue
+
+        if app_id not in channels:
+            native_write({"command": "invalidateEncryption", "appId": app_id})
+            continue
+        enc_key, mac_key = channels[app_id]
+        try:
+            ts = int(time.time() * 1000)
+            plaintext = encstring_decrypt(encstring_from_message(raw), enc_key, mac_key)
+            payload = json.loads(plaintext.decode("utf-8"))
+            if abs((payload.get("timestamp") or ts) - ts) > MESSAGE_MAX_AGE_MS:
+                continue
+            reply = handle_payload(payload, enc_key, mac_key)
+            encrypted = encstring_encrypt(json.dumps(reply).encode("utf-8"), enc_key, mac_key)
+            native_write({"appId": app_id, "messageId": reply.get("messageId"), "message": encrypted})
+        except Exception as exc:
+            log(f"host error: {exc}")
+            native_write({"command": "invalidateEncryption", "appId": app_id})
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# setup / cli
+# ---------------------------------------------------------------------------
+
+def install_self() -> None:
+    src = Path(__file__).resolve()
+    if src != BRIDGE_BIN:
+        BRIDGE_BIN.parent.mkdir(parents=True, exist_ok=True)
+        BRIDGE_BIN.write_bytes(src.read_bytes())
+        BRIDGE_BIN.chmod(0o755)
+    for path in OLD_WRAPPERS:
+        path.unlink(missing_ok=True)
+
+
+def native_manifest() -> dict:
+    return {
+        "name": "com.8bit.bitwarden",
+        "description": "Unlock rbw and the Bitwarden extension with one master password",
+        "path": str(BRIDGE_BIN),
+        "type": "stdio",
+        "allowed_origins": BITWARDEN_ORIGINS,
+    }
+
+
+def install_native_manifests() -> list[Path]:
+    written = []
+    blob = json.dumps(native_manifest(), indent=2) + "\n"
+    for directory in NATIVE_HOST_DIRS:
+        browser_root = directory.parent
+        if directory.name == "NativeMessagingHosts" and not browser_root.exists() and "chromium" not in str(directory):
+            continue
+        directory.mkdir(parents=True, exist_ok=True)
+        dest = directory / "com.8bit.bitwarden.json"
+        if dest.exists() and dest.read_text() == blob:
+            written.append(dest)
+            continue
+        if dest.exists():
+            old = dest.read_text()
+            ours = "vault-bridge" in old or "vault-bitwarden-host" in old
+            if not ours:
+                dest.rename(dest.with_suffix(dest.suffix + f".bak.{int(time.time())}"))
+        dest.write_text(blob)
+        written.append(dest)
+    return written
+
+
+def configure_rbw_pinentry() -> None:
+    subprocess.run(["rbw", "config", "set", "pinentry", str(BRIDGE_BIN)], check=True)
+
+
+def cmd_setup() -> int:
+    quiet = "--quiet" in sys.argv
+    install_self()
+    paths = install_native_manifests()
+    configure_rbw_pinentry()
+    ensure_agent()
+    print("vault-bridge installed.")
+    print("pinentry / native host:", BRIDGE_BIN)
+    print("native host manifests:")
+    for path in paths:
+        print(" ", path)
+    if quiet:
+        return 0
+    print()
+    print("In the Bitwarden extension: Settings → Account security")
+    print("  • Unlock with biometrics: on")
+    print("  • Ask for biometrics on launch: on  (optional, skips an extra click)")
+    print()
+    print("Then Super+Shift+B (rbw wrapper) asks for the master password once.")
+    print("The extension takes that same unlock; it will not prompt for a password.")
+    return 0
+
+
+def cmd_status() -> int:
+    try:
+        st = agent_call({"op": "status"})
+    except Exception as exc:
+        print(f"agent: down ({exc})")
+        st = {"unlocked": False}
+    print("agent unlocked:", bool(st.get("unlocked")))
+    print("rbw unlocked:", rbw_is_unlocked())
+    if st.get("user_id"):
+        print("user id:", st["user_id"])
+    return 0
+
+
+def cmd_unlock() -> int:
+    return subprocess.call(["rbw", "unlock"])
+
+
+def cmd_lock() -> int:
+    try:
+        agent_call({"op": "lock"})
+    except Exception:
+        pass
+    subprocess.call(["rbw", "lock"])
+    return 0
+
+
+def cmd_selftest() -> int:
+    secret = os.urandom(64)
+    enc_key, mac_key = stretch_master_key(hashlib.sha256(b"test").digest())
+    box = encstring_encrypt(secret, enc_key, mac_key)
+    out = encstring_decrypt(box["encryptedString"], enc_key, mac_key)
+    assert out == secret, "encstring roundtrip failed"
+    # RSA OAEP
+    proc = subprocess.run(
+        ["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"],
+        capture_output=True,
+        check=True,
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        pem = Path(tmp) / "key.pem"
+        der = Path(tmp) / "pub.der"
+        pem.write_bytes(proc.stdout)
+        subprocess.run(
+            ["openssl", "pkey", "-in", str(pem), "-pubout", "-outform", "DER", "-out", str(der)],
+            check=True,
+            capture_output=True,
+        )
+        wrapped = rsa_oaep_sha1_encrypt(der.read_bytes(), secret)
+        dec = subprocess.run(
+            [
+                "openssl",
+                "pkeyutl",
+                "-decrypt",
+                "-inkey",
+                str(pem),
+                "-pkeyopt",
+                "rsa_padding_mode:oaep",
+                "-pkeyopt",
+                "rsa_oaep_md:sha1",
+                "-pkeyopt",
+                "rsa_mgf1_md:sha1",
+            ],
+            input=wrapped,
+            capture_output=True,
+            check=True,
+        )
+        assert dec.stdout == secret, "rsa roundtrip failed"
+    assert parse_argv(["vault-bridge"]) == ("status", [])
+    assert parse_argv(["vault-bridge", "setup", "--quiet"]) == ("setup", ["--quiet"])
+    assert parse_argv(
+        ["vault-bridge", "chrome-extension://nngceckbapebfimnlniiiahkandclblb/"]
+    ) == (
+        "host",
+        ["chrome-extension://nngceckbapebfimnlniiiahkandclblb/"],
+    )
+    assert parse_argv(["vault-bridge", "--timeout", "0"]) == (
+        "pinentry",
+        ["--timeout", "0"],
+    )
+    print("selftest ok")
+    return 0
+
+
+def parse_argv(argv: list[str]) -> tuple[str, list[str]]:
+    """rbw and Chrome each exec a single path with no subcommand.
+
+    rbw pinentry always starts with a flag (`--timeout 0`, optional
+    `--ttyname` / `--display`). Chrome's native host gets
+    `chrome-extension://…` as argv[1].
+    """
+    args = argv[1:]
+    if not args:
+        return "status", []
+    head = args[0]
+    if head in ("-h", "--help"):
+        return "help", args[1:]
+    if head in COMMANDS:
+        return head, args[1:]
+    if head.startswith("chrome-extension://"):
+        return "host", args
+    if head.startswith("-"):
+        return "pinentry", args
+    return "help", args
+
+
+def main(argv: list[str]) -> int:
+    cmd, rest = parse_argv(argv)
+    if cmd == "agent":
+        return run_agent()
+    if cmd == "pinentry":
+        return run_pinentry(rest)
+    if cmd == "host":
+        return run_host()
+    if cmd == "setup":
+        return cmd_setup()
+    if cmd == "status":
+        return cmd_status()
+    if cmd == "unlock":
+        return cmd_unlock()
+    if cmd == "lock":
+        return cmd_lock()
+    if cmd == "selftest":
+        return cmd_selftest()
+    sys.stderr.write(
+        "Usage: vault-bridge [agent|pinentry|host|setup|status|unlock|lock|selftest]\n"
+    )
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

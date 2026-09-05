@@ -20,8 +20,11 @@
 -- hl.unbind("SUPER + SPACE")
 -- o.bind("SUPER + SPACE", "Omarchy menu", "omarchy-menu toggle root")
 
--- Disable a default binding without replacing it.
--- hl.unbind("SUPER + SHIFT + B")
+-- Super+Shift+B was a second Browser binding (Super+Shift+Return remains Browser).
+-- Open the Bitwarden wrapper (rbw-tui in a floating terminal), same as the
+-- launcher desktop entry and the Passwörter menu item.
+hl.unbind("SUPER + SHIFT + B")
+o.bind("SUPER + SHIFT + B", "Bitwarden", "omarchy-launch-tui --app-id=TUI.float rbw-tui")
 
 -- Handy dictation (https://handy.computer). SIGUSR2 is the Wayland control
 -- path; `handy --toggle-transcription` hangs on single-instance D-Bus here.
@@ -218,4 +221,8 @@ o.bind("SUPER + SHIFT + G", "WhatsApp", { webapp = "https://web.whatsapp.com/", 
 hl.unbind("SUPER + CTRL + D")
 hl.unbind("SUPER + CTRL + ALT + D")
 o.bind("SUPER + CTRL + ALT + D", "Display", "omarchy-shell shell toggle omarchy.monitor")
-o.bind("SUPER + CTRL + D", "Calendar", "omarchy-shell shell toggle omarchy.clock")
+o.bind("SUPER + CTRL + D", "Calendar", "omarchy-shell shell toggle mailbox.clock")
+
+-- Open/toggle Mailbox email notification panel
+hl.unbind("SUPER + SHIFT + ALT + E")
+o.bind("SUPER + SHIFT + ALT + E", "Mailbox panel", "omarchy-shell shell toggle mailbox.email")

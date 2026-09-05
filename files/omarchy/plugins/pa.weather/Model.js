@@ -324,11 +324,187 @@ function buildForecastDays(report, dailyForecastReport, todayString) {
   return days.length > 0 ? days : wttrNextForecastDays(report, todayString)
 }
 
+function parseLocalDateTime(iso) {
+  var match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(String(iso || ""))
+  if (!match) return null
+
+  var hour = parseInt(match[4], 10)
+  var minute = parseInt(match[5], 10)
+  return {
+    date: match[1] + "-" + match[2] + "-" + match[3],
+    hour: hour,
+    minute: minute,
+    ms: new Date(
+      parseInt(match[1], 10),
+      parseInt(match[2], 10) - 1,
+      parseInt(match[3], 10),
+      hour,
+      minute,
+      0
+    ).getTime()
+  }
+}
+
+function nowMs(now) {
+  if (now && typeof now.getTime === "function") {
+    var ms = now.getTime()
+    if (!isNaN(ms)) return ms
+  }
+  if (typeof now === "number" && !isNaN(now)) return now
+  var parsed = Date.parse(String(now || ""))
+  return isNaN(parsed) ? Date.now() : parsed
+}
+
+var HOUR_MS = 60 * 60 * 1000
+var SUNRISE_ICON = ""
+var SUNSET_ICON = ""
+
+function pad2(n) {
+  return (n < 10 ? "0" : "") + String(n)
+}
+
+function clockLabel(hour, minute) {
+  if (!minute) return String(hour)
+  return hour + ":" + pad2(minute)
+}
+
+function hourlyTempAt(hourly, eventMs) {
+  var bestTemp = ""
+  var bestMs = -Infinity
+  var afterTemp = ""
+  var afterMs = Infinity
+  if (!hourly || !hourly.time) return ""
+
+  for (var i = 0; i < hourly.time.length; i++) {
+    var parsed = parseLocalDateTime(hourly.time[i])
+    if (!parsed) continue
+    var temp = hourly.temperature_2m ? hourly.temperature_2m[i] : ""
+    if (parsed.ms <= eventMs && parsed.ms >= bestMs) {
+      bestMs = parsed.ms
+      bestTemp = temp
+    } else if (parsed.ms > eventMs && parsed.ms < afterMs) {
+      afterMs = parsed.ms
+      afterTemp = temp
+    }
+  }
+  return bestMs !== -Infinity ? bestTemp : afterTemp
+}
+
+function sunEventsFromDaily(daily, currentMs, windowEnd) {
+  var events = []
+  if (!daily) return events
+
+  var kinds = [
+    { key: "sunrise", kind: "sunrise" },
+    { key: "sunset", kind: "sunset" }
+  ]
+  for (var k = 0; k < kinds.length; k++) {
+    var arr = daily[kinds[k].key]
+    if (!arr) continue
+    for (var i = 0; i < arr.length; i++) {
+      var parsed = parseLocalDateTime(arr[i])
+      if (!parsed) continue
+      if (parsed.ms < currentMs || parsed.ms > windowEnd) continue
+      events.push({
+        kind: kinds[k].kind,
+        date: parsed.date,
+        hour: parsed.hour,
+        minute: parsed.minute,
+        ms: parsed.ms,
+        timeLabel: clockLabel(parsed.hour, parsed.minute)
+      })
+    }
+  }
+  return events
+}
+
+function hourSlot(hourly, index, parsed, currentMs) {
+  var tempC = hourly.temperature_2m ? hourly.temperature_2m[index] : ""
+  var hourEnd = parsed.ms + HOUR_MS
+  return {
+    kind: "hour",
+    date: parsed.date,
+    hour: parsed.hour,
+    minute: parsed.minute,
+    ms: parsed.ms,
+    isNow: parsed.ms <= currentMs && currentMs < hourEnd,
+    timeLabel: clockLabel(parsed.hour, parsed.minute),
+    tempC: roundedTemp(tempC),
+    tempF: roundedTemp(celsiusToFahrenheit(tempC)),
+    openMeteoWeatherCode: hourly.weather_code ? hourly.weather_code[index] : null,
+    isDay: hourly.is_day ? hourly.is_day[index] : 1
+  }
+}
+
+// Upcoming hours plus sunrise/sunset, one row. The hour that is still
+// in progress stays (Apple starts the strip there); anything already
+// over is dropped. Sun events slot in at their real time.
+function buildHourlyForecast(dailyForecastReport, now, stepHours, maxCount) {
+  var hourly = dailyForecastReport && dailyForecastReport.hourly ? dailyForecastReport.hourly : null
+  if (!hourly || !hourly.time || !hourly.time.length) return []
+
+  var currentMs = nowMs(now)
+  var step = parseInt(stepHours, 10)
+  if (isNaN(step) || step < 1) step = 1
+  var limit = parseInt(maxCount, 10)
+  if (isNaN(limit) || limit < 1) limit = 12
+  var windowEnd = currentMs + (limit + 4) * step * HOUR_MS
+
+  var hours = []
+  for (var i = 0; i < hourly.time.length; i++) {
+    var parsed = parseLocalDateTime(hourly.time[i])
+    if (!parsed) continue
+    if (parsed.hour % step !== 0) continue
+    if (parsed.ms + HOUR_MS <= currentMs) continue
+    if (parsed.ms > windowEnd) continue
+    hours.push(hourSlot(hourly, i, parsed, currentMs))
+  }
+
+  var suns = sunEventsFromDaily(
+    dailyForecastReport && dailyForecastReport.daily,
+    currentMs,
+    windowEnd
+  )
+  var sunAt = {}
+  for (var s = 0; s < suns.length; s++) {
+    var temp = hourlyTempAt(hourly, suns[s].ms)
+    suns[s].isNow = false
+    suns[s].tempC = roundedTemp(temp)
+    suns[s].tempF = roundedTemp(celsiusToFahrenheit(temp))
+    suns[s].openMeteoWeatherCode = null
+    suns[s].isDay = suns[s].kind === "sunrise" ? 1 : 0
+    sunAt[suns[s].ms] = true
+  }
+
+  var merged = []
+  for (var h = 0; h < hours.length; h++) {
+    if (!sunAt[hours[h].ms]) merged.push(hours[h])
+  }
+  for (s = 0; s < suns.length; s++) merged.push(suns[s])
+  merged.sort(function(a, b) { return a.ms - b.ms })
+  if (merged.length > limit) merged = merged.slice(0, limit)
+  return merged
+}
+
+function hourlySlotIcon(slot) {
+  if (!slot) return ""
+  if (slot.kind === "sunrise") return SUNRISE_ICON
+  if (slot.kind === "sunset") return SUNSET_ICON
+  return iconForOpenMeteoCode(slot.openMeteoWeatherCode, Number(slot.isDay) === 0)
+}
+
 function bareTempForDay(day, kind, useImperial) {
   if (!day) return ""
   var v = useImperial
     ? (kind === "max" ? day.maxtempF : day.mintempF)
     : (kind === "max" ? day.maxtempC : day.mintempC)
+  if (v === undefined || v === null || v === "") return ""
+  return v + "°"
+}
+
+function bareTempForHour(hour, useImperial) {
+  if (!hour) return ""
+  var v = useImperial ? hour.tempF : hour.tempC
   if (v === undefined || v === null || v === "") return ""
   return v + "°"
 }
@@ -416,7 +592,10 @@ if (typeof module !== "undefined") {
     weatherResponseCompletesSave: weatherResponseCompletesSave,
     wttrNextForecastDays: wttrNextForecastDays,
     buildForecastDays: buildForecastDays,
+    buildHourlyForecast: buildHourlyForecast,
+    hourlySlotIcon: hourlySlotIcon,
     bareTempForDay: bareTempForDay,
+    bareTempForHour: bareTempForHour,
     dayIcon: dayIcon,
     iconForOpenMeteoCode: iconForOpenMeteoCode,
     iconForCode: iconForCode

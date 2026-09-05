@@ -7,7 +7,7 @@
   "bar": {
     "position": "top",
     "transparent": true,
-    "centerAnchor": "pa.clock",
+    "centerAnchor": "mailbox.clock",
     "layout": {
       "left": [
         {
@@ -33,7 +33,7 @@
           "type": "qml"
         },
         {
-          "id": "pa.clock",
+          "id": "mailbox.clock",
           "format": "ddd d HH:mm",
           "formatAlt": "d MMMM 'W'ww yyyy",
           "verticalFormat": "HH\n—\nmm",
@@ -43,6 +43,11 @@
         },
         {
           "id": "omarchy.keyboard-layout"
+        },
+        {
+          "id": "mailbox.email",
+          "notify": false,
+          "openCommand": ""
         },
         {
           "id": "pa.weather",

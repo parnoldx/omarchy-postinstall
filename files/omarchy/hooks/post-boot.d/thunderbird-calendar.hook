@@ -1,3 +1,0 @@
-#!/bin/bash
-# Pull Thunderbird events so the clock popup is not empty after login.
-systemctl --user start omarchy-thunderbird-calendar-sync.service >/dev/null 2>&1 || true

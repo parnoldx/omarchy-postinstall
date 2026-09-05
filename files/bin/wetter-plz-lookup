@@ -1,9 +1,10 @@
 #!/usr/bin/python3
 """Resolve a German PLZ to a wetter.de location URL.
 
-Prints: <url>\\t<title>
+Prints: <url>\\t<title>\\t<lat>\\t<lon>
 Used at post-install so the weather pill can open the forecast page later
-without shipping a location in the setup tree.
+without shipping a location in the setup tree. Coordinates feed
+omarchy-weather-location so night light can track sunrise/sunset.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ import urllib.request
 API = "https://api3.wetter.de/api/v1/place-searches?term="
 
 
-def lookup(plz: str) -> tuple[str, str]:
+def lookup(plz: str) -> tuple[str, str, float | None, float | None]:
     req = urllib.request.Request(
         API + urllib.parse.quote(plz),
         headers={
@@ -30,34 +31,42 @@ def lookup(plz: str) -> tuple[str, str]:
     with urllib.request.urlopen(req, timeout=15) as response:
         payload = json.load(response)
 
-    ranked: list[tuple[int, str, str]] = []
+    ranked: list[tuple[int, str, str, float | None, float | None]] = []
     for item in payload.get("data") or []:
         attrs = item.get("attributes") or {}
         path = str(attrs.get("url") or "")
         title = str(attrs.get("title") or "")
         if not path.startswith("/wetter/"):
             continue
+        loc = attrs.get("location") or {}
+        lat = loc.get("lat")
+        lon = loc.get("lon")
+        name = str(attrs.get("place") or title)
         score = 0
         if plz in title:
             score += 2
         if path.startswith("/wetter/r/"):
             score += 1
-        ranked.append((score, path, title))
+        if lat is not None and lon is not None:
+            score += 1
+        ranked.append((score, path, name, lat, lon))
 
     if not ranked:
         raise SystemExit(f"no wetter.de location for PLZ {plz}")
 
     ranked.sort(key=lambda row: -row[0])
-    _, path, title = ranked[0]
-    return "https://www.wetter.de" + path, title
+    _, path, name, lat, lon = ranked[0]
+    return "https://www.wetter.de" + path, name, lat, lon
 
 
 def main() -> int:
     if len(sys.argv) != 2 or not re.fullmatch(r"[0-9]{5}", sys.argv[1]):
         print("Usage: wetter-plz-lookup <5-digit-plz>", file=sys.stderr)
         return 2
-    url, title = lookup(sys.argv[1])
-    print(f"{url}\t{title}")
+    url, title, lat, lon = lookup(sys.argv[1])
+    lat_s = "" if lat is None else str(lat)
+    lon_s = "" if lon is None else str(lon)
+    print(f"{url}\t{title}\t{lat_s}\t{lon_s}")
     return 0
 
 
