@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# "Fix once, remembered": you fixed the word in your document — select the
+# CORRECT word, press the hotkey (CTRL+F3), type what it originally
+# transcribed. Saved as a native voxtype replacement (config.toml).
+set -e
+learn="$HOME/.local/bin/voxtype-learn"
+sel=$(wl-paste -p --no-newline 2>/dev/null | xargs)
+
+if [ -z "$sel" ]; then
+  omarchy-launch-tui --app-id=TUI.float bash -c \
+    'echo "Nothing selected. Fix the word in your text first, then select it and press the hotkey again."; sleep 3'
+  exit 0
+fi
+
+omarchy-launch-tui --app-id=TUI.float bash -c '
+  sel=$1; learn=$2
+  echo "voxtype — fix once, remember"
+  printf "\n  correct word: \033[1m%s\033[0m\n\nType what it originally transcribed (Ctrl+C = cancel):\nheard> " "$sel"
+  read -r heard || exit 0
+  [ -z "$heard" ] && exit 0
+  echo
+  "$learn" "$heard" "$sel"
+  sleep 2
+' sh "$sel" "$learn"

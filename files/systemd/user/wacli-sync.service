@@ -1,0 +1,13 @@
+[Unit]
+Description=wacli WhatsApp follow-sync
+Documentation=https://wacli.sh
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/wacli sync --follow --presence-mode quiet
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

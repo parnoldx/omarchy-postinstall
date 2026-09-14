@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""Make VS Code the Files / xdg-open handler for text and source files.
+
+Omarchy's `default editor` only affects omarchy-launch-editor. Nautilus
+uses MIME associations, which still point at nvim unless we set them.
+Does not steal HTML, directories, images, video, PDF, or mail.
+"""
+
+from __future__ import annotations
+
+from collections import OrderedDict
+from pathlib import Path
+import time
+
+MIMEAPPS = Path.home() / ".config/mimeapps.list"
+DESKTOP = "code.desktop"
+
+# Types Omarchy maps to nvim, plus common source/config types Files will see.
+MIMES = (
+    "text/plain",
+    "text/english",
+    "text/x-makefile",
+    "text/x-c++hdr",
+    "text/x-c++src",
+    "text/x-chdr",
+    "text/x-csrc",
+    "text/x-java",
+    "text/x-java-source",
+    "text/x-moc",
+    "text/x-pascal",
+    "text/x-tcl",
+    "text/x-tex",
+    "application/x-shellscript",
+    "text/x-shellscript",
+    "text/x-sh",
+    "text/x-c",
+    "text/x-c++",
+    "application/xml",
+    "text/xml",
+    "text/x-python",
+    "text/x-python2",
+    "text/x-python3",
+    "text/javascript",
+    "application/javascript",
+    "application/x-javascript",
+    "application/json",
+    "application/schema+json",
+    "text/markdown",
+    "text/x-markdown",
+    "text/x-lua",
+    "text/rust",
+    "text/x-rustsrc",
+    "text/x-go",
+    "application/x-ruby",
+    "text/x-ruby",
+    "application/toml",
+    "application/yaml",
+    "application/x-yaml",
+    "text/x-yaml",
+    "text/css",
+    "text/x-scss",
+    "text/x-sass",
+    "text/x-php",
+    "application/x-php",
+    "application/sql",
+    "text/x-sql",
+    "application/typescript",
+    "text/x-typescript",
+    "text/x-csharp",
+    "text/x-kotlin",
+    "text/x-haskell",
+    "text/x-ocaml",
+    "text/x-scala",
+    "text/x-swift",
+    "text/x-erlang",
+    "text/x-perl",
+    "application/x-perl",
+    "text/x-cmake",
+    "text/x-meson",
+    "text/x-patch",
+    "text/x-diff",
+    "text/x-log",
+    "text/csv",
+    "text/tab-separated-values",
+    "application/x-desktop",
+    "inode/x-empty",
+    "text/x-ini",
+    "application/x-wine-extension-ini",
+    "text/x-properties",
+    "application/graphql",
+    "application/x-ndjson",
+    "application/x-ipynb+json",
+    "text/x-dockerfile",
+    "text/x-texinfo",
+    "text/x-adasrc",
+    "text/x-nfo",
+    "text/x-readme",
+    "text/x-copying",
+    "text/x-credits",
+    "text/x-authors",
+    "text/x-install",
+    "application/x-zerosize",
+)
+
+
+def parse(text: str) -> OrderedDict[str, OrderedDict[str, str]]:
+    sections: OrderedDict[str, OrderedDict[str, str]] = OrderedDict()
+    current: str | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current = line[1:-1]
+            sections.setdefault(current, OrderedDict())
+            continue
+        if current is None or "=" not in raw:
+            continue
+        key, value = raw.split("=", 1)
+        sections[current][key.strip()] = value.strip()
+    return sections
+
+
+def dump(sections: OrderedDict[str, OrderedDict[str, str]]) -> str:
+    lines: list[str] = []
+    for name, entries in sections.items():
+        lines.append(f"[{name}]")
+        for key, value in entries.items():
+            lines.append(f"{key}={value}")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def apply(sections: OrderedDict[str, OrderedDict[str, str]]) -> bool:
+    defaults = sections.setdefault("Default Applications", OrderedDict())
+    added = sections.setdefault("Added Associations", OrderedDict())
+    changed = False
+    for mime in MIMES:
+        if defaults.get(mime) != DESKTOP:
+            defaults[mime] = DESKTOP
+            changed = True
+        apps = [a for a in added.get(mime, "").split(";") if a]
+        if not apps or apps[0] != DESKTOP:
+            apps = [DESKTOP] + [a for a in apps if a != DESKTOP]
+            added[mime] = ";".join(apps) + ";"
+            changed = True
+    return changed
+
+
+def main() -> int:
+    MIMEAPPS.parent.mkdir(parents=True, exist_ok=True)
+    original = MIMEAPPS.read_text() if MIMEAPPS.exists() else ""
+    sections = parse(original)
+    if not apply(sections):
+        return 0
+    if original:
+        backup = MIMEAPPS.with_name(f"mimeapps.list.bak.{int(time.time())}")
+        backup.write_text(original)
+    MIMEAPPS.write_text(dump(sections))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,93 @@
+#!/bin/bash
+# Password picker TUI around rbw + fzf.
+#
+# omarchy:summary=Fuzzy-find a Bitwarden entry and copy its password, username or TOTP code.
+# omarchy:group=menu
+# omarchy:examples=rbw-tui
+#
+# Keys: enter = password · ctrl-u = username · ctrl-t = TOTP · esc = quit
+# Clipboard auto-clears after $CLEAR_AFTER seconds — but only if you have not
+# copied something else in the meantime.
+
+set -euo pipefail
+
+CLEAR_AFTER=25
+
+command -v rbw >/dev/null || { echo "rbw not installed" >&2; exit 1; }
+command -v fzf >/dev/null || { echo "fzf not installed" >&2; exit 1; }
+command -v wl-copy >/dev/null || { echo "wl-copy not installed" >&2; exit 1; }
+
+notify() {
+  command -v notify-send >/dev/null && notify-send -t 2000 "$@"
+}
+
+copy_with_autoclear() {
+  local label=$1 value=$2
+  [[ -n $value ]] || return 1
+  printf '%s' "$value" | wl-copy
+  (
+    sleep "$CLEAR_AFTER"
+    # Only wipe if nothing newer was copied in the meantime.
+    if [[ $(wl-paste --no-newline 2>/dev/null) == "$value" ]]; then
+      printf '' | wl-copy
+    fi
+  ) >/dev/null 2>&1 &
+  disown
+  notify "Vault" "$label copied · clipboard clears in ${CLEAR_AFTER}s"
+}
+
+# Unlock once; rbw agent keeps the key for lock_timeout (see rbw config).
+if ! rbw unlocked >/dev/null 2>&1; then
+  echo "Unlocking Bitwarden vault…"
+  rbw unlock || exit 0
+fi
+
+entries=$(rbw list --fields name,user 2>/dev/null) || entries=""
+[[ -n $entries ]] || { notify "Vault" "No entries found (run: rbw sync)"; exit 0; }
+
+key=$(printf '%s\n' "$entries" | fzf \
+  --delimiter='\t' \
+  --with-nth=1,2 \
+  --header=$'enter: copy password   ctrl-u: copy username   ctrl-t: copy TOTP   esc: quit' \
+  --header-first \
+  --expect=ctrl-u,ctrl-t \
+  --prompt='vault > ' \
+  --color 'pointer:green,marker:green,header:dim')
+
+pressed=$(head -n1 <<<"$key")
+line=$(sed -n 2p <<<"$key")
+[[ -n $line ]] || exit 0
+
+name=${line%%$'\t'*}
+user=${line#*$'\t'}
+[[ $user == "$name" ]] && user=""   # no tab present → no username column
+
+get() {
+  local field_flag=()
+  [[ -n ${1:-} ]] && field_flag=(--field "$1")
+  if [[ -n $user ]]; then
+    rbw get "${field_flag[@]}" "$name" "$user" 2>/dev/null
+  else
+    rbw get "${field_flag[@]}" "$name" 2>/dev/null
+  fi
+}
+
+case $pressed in
+  ctrl-u)
+    copy_with_autoclear "Username ($name)" "$user" || notify "Vault" "Entry has no username"
+    ;;
+  ctrl-t)
+    if ! totp=$(rbw code "$name" "$user" 2>/dev/null) && ! totp=$(rbw code "$name" 2>/dev/null); then
+      notify "Vault" "'$name' has no TOTP secret"
+      exit 0
+    fi
+    copy_with_autoclear "TOTP ($name)" "$totp"
+    ;;
+  *)
+    if ! pass=$(get password); then
+      notify "Vault" "Could not read password for '$name'"
+      exit 0
+    fi
+    copy_with_autoclear "Password ($name)" "$pass"
+    ;;
+esac

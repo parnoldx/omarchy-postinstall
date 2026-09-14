@@ -1,0 +1,14 @@
+[Unit]
+Description=Refresh Hyper usage for the Omarchy agents panel
+
+[Timer]
+OnBootSec=30s
+# ponytail: OnUnitActiveSec is monotonic-based and wedges forever ("Trigger: n/a")
+# when the next elapse lands in the past after suspend/resume; wall-clock never does.
+OnCalendar=*:0/15
+AccuracySec=30s
+Persistent=true
+Unit=omarchy-agent-usage-hyper.service
+
+[Install]
+WantedBy=timers.target

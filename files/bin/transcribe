@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# Transcribe an audio/video file with VoxType's default local model.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF' >&2
+Usage: transcribe [-o FILE] AUDIO_OR_VIDEO
+
+Transcribe an audio or video file with the same local model VoxType
+uses for dictation.
+
+Converts to 16 kHz mono 16-bit PCM WAV when needed, then runs
+voxtype transcribe. The transcript is printed to stdout.
+Pass -o FILE to also write it to a file.
+
+Options:
+  -o, --output FILE   Write transcript to FILE
+  -h, --help          Show this help
+EOF
+  exit "${1:-2}"
+}
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "error: $1 is required" >&2
+    exit 1
+  }
+}
+
+# True if the file is NOT already 16 kHz mono 16-bit PCM, which voxtype wants.
+needs_conversion() {
+  [[ "$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name,channels,sample_rate -of csv=p=0 -- "$1")" != "pcm_s16le,16000,1" ]]
+}
+
+# voxtype 1.0.1 prints progress lines to stdout, not stderr; drop them.
+clean_text() {
+  awk '
+    /^(Loading audio file:|Audio format:|Processing [0-9]+ samples|Resampling from)/ { next }
+    /^$/ { pending = pending "\n"; next }
+    { if (pending != "") { printf "%s", pending; pending = "" } print }
+  '
+}
+
+output=""
+input=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h | --help)
+      usage 0
+      ;;
+    -o | --output)
+      [[ $# -ge 2 ]] || {
+        echo "error: $1 needs a file path" >&2
+        usage
+      }
+      output=$2
+      shift 2
+      ;;
+    --)
+      shift
+      [[ $# -eq 1 ]] || usage
+      input=$1
+      break
+      ;;
+    -*)
+      echo "error: unknown option: $1" >&2
+      usage
+      ;;
+    *)
+      [[ -z "$input" ]] || {
+        echo "error: extra argument: $1" >&2
+        usage
+      }
+      input=$1
+      shift
+      ;;
+  esac
+done
+
+[[ -n "$input" ]] || usage
+
+need voxtype
+need ffmpeg
+need ffprobe
+
+[[ -f "$input" ]] || {
+  echo "error: not a file: $input" >&2
+  exit 2
+}
+
+wav=$input
+tmp=
+cleanup() {
+  [[ -z "${tmp:-}" ]] || rm -rf "$tmp"
+}
+trap cleanup EXIT
+
+if needs_conversion "$input"; then
+  tmp=$(mktemp -d)
+  wav=$tmp/audio.wav
+  echo "converting to 16 kHz mono WAV..." >&2
+  ffmpeg -hide_banner -nostdin -loglevel error -y \
+    -i "$input" -vn -ac 1 -ar 16000 -c:a pcm_s16le -f wav "$wav" \
+    || {
+      echo "error: could not extract 16 kHz mono audio from $input" >&2
+      exit 1
+    }
+fi
+
+echo "transcribing with VoxType default model..." >&2
+if [[ -n "$output" ]]; then
+  mkdir -p "$(dirname -- "$output")"
+  voxtype -q transcribe "$wav" | clean_text | tee "$output"
+  echo "wrote $output" >&2
+else
+  voxtype -q transcribe "$wav" | clean_text
+fi

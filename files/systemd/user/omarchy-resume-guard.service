@@ -1,0 +1,18 @@
+[Unit]
+Description=Recover the Omarchy shell if it hangs after resume
+# Same wiring as omarchy-sleep-lock.service: UWSM imports OMARCHY_PATH and
+# WAYLAND_DISPLAY into the user manager before graphical-session.target.
+After=dbus.socket wayland-session-waitenv.service
+Requires=dbus.socket
+PartOf=graphical-session.target
+ConditionEnvironment=OMARCHY_PATH
+ConditionEnvironment=WAYLAND_DISPLAY
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/omarchy-resume-guard
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

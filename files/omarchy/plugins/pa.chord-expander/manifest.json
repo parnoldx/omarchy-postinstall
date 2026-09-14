@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "pa.chord-expander",
+  "name": "Chord Expander",
+  "version": "0.1.0",
+  "author": "pa",
+  "license": "MIT",
+  "description": "Edit chord-expander snippets from the Omarchy bar. Insertion is a static Hyprland submap (SUPER + E then a key, or twice for the picker); this widget only manages ~/.config/chord-expander/snippets.json and never regenerates Hyprland config.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Chord Expander",
+    "description": "Manage snippet chords",
+    "category": "Utilities",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresh Grok usage for the Omarchy agents panel
+
+[Timer]
+OnBootSec=30s
+# Same wedge risk as the hyper timer; see comment there.
+OnCalendar=*:0/15
+AccuracySec=30s
+Persistent=true
+Unit=omarchy-agent-usage-grok.service
+
+[Install]
+WantedBy=timers.target

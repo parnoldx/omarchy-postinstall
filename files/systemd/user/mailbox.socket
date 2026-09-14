@@ -1,0 +1,13 @@
+[Unit]
+Description=mailbox daemon socket
+Documentation=man:mailbox(1)
+
+[Socket]
+# %t is the runtime directory, so this is the path mailbox looks for by
+# default. SocketMode is the whole access control: the socket speaks for a
+# logged-in mailbox, and nobody else on the machine gets to.
+ListenStream=%t/mailbox.sock
+SocketMode=0600
+
+[Install]
+WantedBy=sockets.target

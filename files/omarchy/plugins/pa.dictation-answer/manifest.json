@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "pa.dictation-answer",
+  "name": "Dictation answer",
+  "version": "1.0.0",
+  "author": "pa",
+  "description": "Top-right markdown card for Ctrl+F2 dictation answers and Ctrl+Shift+F2 agent actions. No keyboard steal; sits under live notification toasts.",
+  "kinds": ["overlay"],
+  "keepLoaded": true,
+  "entryPoints": { "overlay": "Overlay.qml" }
+}

@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh hyprsunset sunrise/sunset profiles daily
+
+[Timer]
+OnCalendar=*-*-* 00:10:00
+Persistent=true
+Unit=hyprsunset-solar.service
+
+[Install]
+WantedBy=timers.target

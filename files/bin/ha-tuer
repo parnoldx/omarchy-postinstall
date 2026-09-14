@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Pulse the Shelly door opener from the Omarchy launcher.
+set -euo pipefail
+
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/shelly"
+AUTH_FILE="$CONF/auth_key"
+DEVICE_ID="c45bbe6ac76d"
+API="https://shelly-207-eu.shelly.cloud/device/relay/control"
+
+if [[ ! -r $AUTH_FILE ]]; then
+  echo "Missing Shelly auth key in $AUTH_FILE" >&2
+  exit 1
+fi
+
+AUTH=$(<"$AUTH_FILE")
+AUTH=${AUTH//$'\r'/}
+AUTH=${AUTH//$'\n'/}
+
+curl -fsS -m 8 -X POST "$API" \
+  --data-urlencode "channel=0" \
+  --data-urlencode "turn=on" \
+  --data-urlencode "id=$DEVICE_ID" \
+  --data-urlencode "auth_key=$AUTH" >/dev/null

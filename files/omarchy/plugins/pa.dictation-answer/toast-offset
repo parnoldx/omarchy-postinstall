@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""Print the pixel offset the F3 answer card should sit below live toasts.
+
+Omarchy notifications write one JSON file per on-screen toast in
+~/.local/state/omarchy/notifications/ (history/ is archived). This process
+watches that directory and prints a new integer whenever the stack height
+changes, so the answer card can share the column instead of covering a toast.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+import time
+from pathlib import Path
+
+# Match NotificationCard at spacing scale 1: width 380, title 14px, 3-line body.
+CARD_INNER_CHARS = 38
+LINE = 18
+ICON = 40
+GAP = 8
+BORDER = 4
+
+
+def toast_dir() -> Path:
+    override = os.environ.get("HANDY_TOAST_DIR")
+    if override:
+        return Path(override)
+    state = os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))
+    return Path(state) / "omarchy" / "notifications"
+
+
+def wrapped_lines(text: str, width: int, cap: int) -> int:
+    text = re.sub(r"<[^>]+>", " ", text or "")
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return 0
+    n = 1
+    col = 0
+    for word in text.split(" "):
+        w = len(word)
+        if col and col + 1 + w > width:
+            n += 1
+            col = w
+            if n >= cap:
+                return cap
+        else:
+            col = col + (1 if col else 0) + w
+    return min(cap, max(1, n))
+
+
+def toast_height(entry: dict) -> int:
+    summary = str(entry.get("summary") or "")
+    body = str(entry.get("body") or "")
+    body_plain = re.sub(r"<[^>]+>", " ", body)
+    body_plain = re.sub(r"\s+", " ", body_plain).strip()
+    has_body = bool(body_plain)
+    pad = 14 if not has_body else 20
+    title_h = wrapped_lines(summary, CARD_INNER_CHARS, 2) * LINE
+    text_h = max(LINE, title_h)
+    if has_body:
+        text_h += 2 + wrapped_lines(body_plain, CARD_INNER_CHARS, 3) * LINE
+    return pad + max(ICON, text_h) + BORDER
+
+
+def stack_offset(directory: Path) -> int:
+    if not directory.is_dir():
+        return 0
+    total = 0
+    count = 0
+    for path in sorted(directory.glob("*.json")):
+        if not path.is_file():
+            continue
+        try:
+            entry = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        total += toast_height(entry)
+        count += 1
+    if count == 0:
+        return 0
+    return total + count * GAP
+
+
+def main() -> int:
+    directory = toast_dir()
+    last: int | None = None
+    while True:
+        offset = stack_offset(directory)
+        if offset != last:
+            print(offset, flush=True)
+            last = offset
+        time.sleep(0.15)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(0)

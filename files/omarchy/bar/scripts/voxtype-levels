@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+"""Stream live mic level (0..1) from voxtype's audio.sock as one float per line.
+
+The voxtype daemon emits 16-byte AudioFrames at 100 Hz while recording:
+    { seq: u32, min: f32, max: f32, peak_dbfs: f32 }  (native byte order)
+This bridge decodes them and prints the smoothed level on change:
+instant attack, ~150 ms decay, so the bar icon breathes with your voice.
+Exits on socket close; the QML side restarts it (reconnects on daemon restart).
+"""
+
+from __future__ import annotations
+
+import os
+import socket
+import struct
+import time
+from pathlib import Path
+
+RUNTIME = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
+SOCK = RUNTIME / "voxtype" / "audio.sock"
+FRAME = struct.Struct("I3f")  # seq, min, max, peak_dbfs (native)
+DECAY = 0.93  # per 10 ms frame; 1.0 -> 0.5 in ~135 ms
+GAMMA = 0.3  # display boost: speech peaks (~0.1-0.4 raw) map well up the scale
+
+
+def emit(value: float, state: list) -> None:
+    now = time.monotonic()
+    if abs(value - state[0]) >= 0.02 or now - state[1] > 0.2:
+        print(f"{value:.3f}", flush=True)
+        state[0], state[1] = value, now
+
+
+def run() -> None:
+    state = [0.0, 0.0]  # [last emitted, last emit time]
+    while True:
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.connect(str(SOCK))
+        except OSError:
+            return  # daemon not running
+        # reconnect: fresh recording, fresh level
+        state = [0.0, 0.0]
+        cur = 0.0
+        try:
+            buf = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    return  # recording ended, daemon closed the socket
+                buf += chunk
+                while len(buf) >= FRAME.size:
+                    raw, buf = buf[: FRAME.size], buf[FRAME.size :]
+                    _, _, mx, _ = FRAME.unpack(raw)
+                    level = min(1.0, max(0.0, abs(mx)))
+                    cur = level if level > cur else max(level, cur * DECAY)
+                    # gamma boost so normal speech clearly shows color
+                    emit(min(1.0, cur ** GAMMA), state)
+        finally:
+            sock.close()
+
+
+if __name__ == "__main__":
+    try:
+        run()
+    except KeyboardInterrupt:
+        pass

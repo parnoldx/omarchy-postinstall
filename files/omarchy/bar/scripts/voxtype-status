@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""Stream Voxtype dictation state as one word per line: idle, recording, transcribing, agent.
+
+State source: voxtype's own state file ($XDG_RUNTIME_DIR/voxtype/state,
+written by the daemon; see [output] state_file = "auto" in the config).
+Agent state comes from the dictation orchestrator's runtime files.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import time
+from pathlib import Path
+
+RUNTIME = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "voxtype-dictation"
+VOXSTATE = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "voxtype" / "state"
+
+
+def read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def agent_busy() -> bool:
+    if read_text(RUNTIME / "phase") != "agent":
+        return False
+    for name in ("paste.pid", "agent.pid"):
+        try:
+            pid = int((RUNTIME / name).read_text().strip() or "0")
+        except (OSError, ValueError):
+            continue
+        if pid_alive(pid):
+            return True
+    return False
+
+
+def vox_state() -> str:
+    state = read_text(VOXSTATE)
+    return state if state in {"idle", "recording", "transcribing"} else "idle"
+
+
+def emit(state: str, last: str | None) -> str:
+    if state != last:
+        print(state, flush=True)
+    return state
+
+
+def main() -> int:
+    last: str | None = None
+    while True:
+        state = vox_state()
+        # Agent mark only while an agent is actually running (phase file +
+        # live pids). `mode` persists after a stop by design and goes stale
+        # whenever recording is cancelled out-of-band, so it never means busy.
+        if state != "recording" and agent_busy():
+            state = "agent"
+        last = emit(state, last)
+        time.sleep(0.15)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(0)

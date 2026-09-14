@@ -1,0 +1,323 @@
+#!/usr/bin/env python3
+"""Apply the Omarchy-generated Grok theme to the Grok TUI.
+
+Source of truth: ~/.config/omarchy/themed/grok.toml.tpl
+  → rendered with the active Omarchy palette (same variables/mix as
+    claude.json.tpl / alacritty.toml.tpl)
+  → ~/.local/state/omarchy/current/theme/grok.toml
+  → ~/.grok/themes/omarchy.toml
+
+Grok 1.0.x cannot load a custom theme file. This overlays the rendered
+slots onto the compiled TokyoNight palette and pins [ui].theme to
+tokyonight so the TUI uses that pool.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+
+HOME = Path.home()
+TPL = HOME / ".config/omarchy/themed/grok.toml.tpl"
+COLORS_FILE = HOME / ".local/state/omarchy/current/theme/colors.toml"
+GENERATED = HOME / ".local/state/omarchy/current/theme/grok.toml"
+GROK_THEME = HOME / ".grok/themes/omarchy.toml"
+GROK_LINK = HOME / ".grok/bin/grok"
+GROK_CONFIG = HOME / ".grok/config.toml"
+
+UPSTREAM_SIG = bytes.fromhex("1124283b11292e4211292e4211292e42")
+BLOB_LEN = 160
+
+IMMEDIATES: list[tuple[bytes, list[str]]] = [
+    (bytes.fromhex("1128314c"), ["bg_hover"]),
+    (bytes.fromhex("1164b4aa"), ["accent_skill"]),
+    (bytes.fromhex("11e6b432"), ["accent_plan"]),
+    (bytes.fromhex("114b5c8c111abc9c"), ["prompt_border_active", "accent_model"]),
+    (bytes.fromhex("111f233511292e42"), ["scrollbar_bg", "scrollbar_fg"]),
+    (bytes.fromhex("11550f14"), ["diff_delete_bg"]),
+    (bytes.fromhex("110f4114"), ["diff_insert_bg"]),
+    (bytes.fromhex("11283457"), ["bg_visual"]),
+]
+
+BLOB_SLOTS = [
+    "bg_base",
+    "bg_light",
+    "bg_dark",
+    "bg_highlight",
+    "bg_terminal",
+    "accent_user",
+    "accent_assistant",
+    "accent_thinking",
+    "accent_tool",
+    "accent_system",
+    "accent_error",
+    "accent_success",
+    "text_primary",
+    "text_secondary",
+    "gray_dim",
+    "gray",
+    "gray_bright",
+    "command",
+    "path",
+    "running",
+    "accent_remember",
+    "selection_border",
+    "hover_border",
+    "prompt_border",
+    "paste_bg",
+    "paste_fg",
+    "paste_dim",
+    "md_heading_h1",
+    "md_heading_h2",
+    "md_heading_h3",
+    "md_heading_h4",
+    "md_heading_h5",
+    "md_heading_h6",
+    "md_code",
+    "md_task_checked",
+    "md_task_unchecked",
+    "md_muted",
+    "md_code_bg",
+    "md_text",
+    "link_fg",
+]
+
+MIX_RE = re.compile(
+    r"\{\{\s*mix(?:_strip|_rgb)?\s+([A-Za-z0-9_]+)\s+([A-Za-z0-9_]+)\s+([0-9]+(?:\.[0-9]+)?)%?\s*\}\}"
+)
+VAR_RE = re.compile(r"\{\{\s*([A-Za-z0-9_]+)(_strip|_rgb)?\s*\}\}")
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"omarchy-theme-set-grok: {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def parse_hex(value: str) -> tuple[int, int, int]:
+    h = value.strip().lstrip("#")
+    if len(h) != 6:
+        die(f"invalid hex color {value!r}")
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def mix(start: str, end: str, amount: float) -> str:
+    sr, sg, sb = parse_hex(start)
+    er, eg, eb = parse_hex(end)
+    r = int(sr * (1 - amount) + er * amount + 0.5)
+    g = int(sg * (1 - amount) + eg * amount + 0.5)
+    b = int(sb * (1 - amount) + eb * amount + 0.5)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def hex_to_rgb(value: str) -> str:
+    r, g, b = parse_hex(value)
+    return f"{r},{g},{b}"
+
+
+def load_omarchy_colors() -> dict[str, str]:
+    if not COLORS_FILE.is_file():
+        die(f"missing {COLORS_FILE}")
+    proc = subprocess.run(
+        ["omarchy-theme-color", "--file", str(COLORS_FILE), "--all"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    colors: dict[str, str] = {}
+    for line in proc.stdout.splitlines():
+        if "\t" in line:
+            key, value = line.split("\t", 1)
+        elif "#" in line:
+            key, value = line.split("#", 1)
+            value = "#" + value
+        else:
+            continue
+        colors[key.strip()] = value.strip()
+    if "background" not in colors or "foreground" not in colors:
+        die("Omarchy colors.toml is missing background/foreground")
+    return colors
+
+
+def render_template(tpl: str, colors: dict[str, str]) -> str:
+    def mix_sub(match: re.Match[str]) -> str:
+        start = colors.get(match.group(1), "")
+        end = colors.get(match.group(2), "")
+        amount = float(match.group(3))
+        if amount > 1:
+            amount /= 100.0
+        token = match.group(0)
+        if "mix_strip" in token:
+            return mix(start, end, amount).lstrip("#")
+        if "mix_rgb" in token:
+            return hex_to_rgb(mix(start, end, amount))
+        return mix(start, end, amount)
+
+    rendered = MIX_RE.sub(mix_sub, tpl)
+
+    def var_sub(match: re.Match[str]) -> str:
+        key, modifier = match.group(1), match.group(2)
+        value = colors.get(key)
+        if value is None:
+            return match.group(0)
+        if modifier == "_strip":
+            return value.lstrip("#")
+        if modifier == "_rgb" and value.startswith("#"):
+            return hex_to_rgb(value)
+        return value
+
+    return VAR_RE.sub(var_sub, rendered)
+
+
+def load_theme_colors(text: str) -> dict[str, str]:
+    parsed = tomllib.loads(text)
+    table = parsed.get("colors")
+    if not isinstance(table, dict):
+        die("grok.toml is missing a [colors] table")
+    colors = {str(k): str(v) for k, v in table.items()}
+    missing = [name for name in BLOB_SLOTS if name not in colors]
+    extra = [name for _, names in IMMEDIATES for name in names if name not in colors]
+    missing = sorted(set(missing + extra))
+    if missing:
+        die("grok.toml missing color slots: " + ", ".join(missing))
+    return colors
+
+
+def rgb_color(hex_color: str) -> bytes:
+    r, g, b = parse_hex(hex_color)
+    return bytes((0x11, r, g, b))
+
+
+def resolve_grok_binary() -> Path:
+    if not GROK_LINK.exists():
+        die(f"missing {GROK_LINK}")
+    return GROK_LINK.resolve()
+
+
+def ensure_upstream(binary: Path) -> Path:
+    upstream = binary.with_name(binary.name + ".upstream")
+    data = binary.read_bytes() if binary.exists() else b""
+    if UPSTREAM_SIG in data:
+        if not upstream.exists() or upstream.read_bytes()[:4096] != data[:4096]:
+            shutil.copy2(binary, upstream)
+        return upstream
+    if upstream.is_file() and UPSTREAM_SIG in upstream.read_bytes():
+        return upstream
+    die(
+        "this grok binary is not a known TokyoNight build (signature missing). "
+        "Re-run after `grok update` if a new version shipped."
+    )
+    raise AssertionError
+
+
+def replace_unique(buf: bytearray, old: bytes, new: bytes, label: str) -> None:
+    if len(old) != len(new):
+        die(f"{label} patch length mismatch")
+    count = buf.count(old)
+    if count != 1:
+        die(f"{label} immediate is not unique ({count} hits)")
+    at = buf.find(old)
+    buf[at : at + len(old)] = new
+
+
+def patch_buffer(raw: bytes, colors: dict[str, str]) -> bytearray:
+    buf = bytearray(raw)
+    off = buf.find(UPSTREAM_SIG)
+    if off < 0:
+        die("TokyoNight color pool signature not found in upstream grok")
+    blob = b"".join(rgb_color(colors[name]) for name in BLOB_SLOTS)
+    if len(blob) != BLOB_LEN:
+        die(f"internal blob length {len(blob)} != {BLOB_LEN}")
+    buf[off : off + BLOB_LEN] = blob
+    for old, names in IMMEDIATES:
+        new = b"".join(rgb_color(colors[name]) for name in names)
+        replace_unique(buf, old, new, "+".join(names))
+    return buf
+
+
+def write_atomic(path: Path, data: bytes, mode: int | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(data)
+    if mode is not None:
+        os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def _upsert_ui_key(section: str, key: str, value: str) -> str:
+    line = f'{key} = "{value}"'
+    if re.search(rf"(?m)^{re.escape(key)}\s*=", section):
+        return re.sub(rf"(?m)^{re.escape(key)}\s*=\s*.*$", line, section, count=1)
+    prefix = "\n" if not section.startswith("\n") else ""
+    return "\n" + line + prefix + section
+
+
+def pin_grok_theme_name() -> None:
+    """Keep the TUI on the TokyoNight carrier, even if auto mode is on.
+
+    The Omarchy overlay is compiled into the TokyoNight color pool. `theme =
+    "auto"` otherwise resolves dark mode to GrokNight and the overlay vanishes.
+    """
+    text = GROK_CONFIG.read_text() if GROK_CONFIG.exists() else ""
+    pins = (("theme", "tokyonight"), ("auto_dark_theme", "tokyonight"))
+    ui_header = re.search(r"(?m)^\[ui\]\s*$", text)
+    if ui_header:
+        start = ui_header.end()
+        nxt = re.search(r"(?m)^\[", text[start:])
+        end = start + nxt.start() if nxt else len(text)
+        section = text[start:end]
+        for key, value in pins:
+            section = _upsert_ui_key(section, key, value)
+        text = text[:start] + section + text[end:]
+    else:
+        if text and not text.endswith("\n"):
+            text += "\n"
+        text += "\n[ui]\n"
+        for key, value in pins:
+            text += f'{key} = "{value}"\n'
+    GROK_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    GROK_CONFIG.write_text(text)
+
+
+def canvas_signature(colors: dict[str, str]) -> bytes:
+    return b"".join(rgb_color(colors[name]) for name in BLOB_SLOTS[:4])
+
+
+def main() -> None:
+    if not TPL.is_file():
+        die(f"missing template {TPL}")
+    palette = load_omarchy_colors()
+    rendered = render_template(TPL.read_text(), palette)
+    leftover = VAR_RE.findall(rendered)
+    leftover_mix = MIX_RE.findall(rendered)
+    if leftover or leftover_mix:
+        die(f"unresolved template tokens: {leftover or leftover_mix}")
+    colors = load_theme_colors(rendered)
+
+    write_atomic(GENERATED, rendered.encode())
+    write_atomic(GROK_THEME, rendered.encode())
+    pin_grok_theme_name()
+
+    binary = resolve_grok_binary()
+    if canvas_signature(colors) in binary.read_bytes():
+        print(
+            f"omarchy grok theme already applied  canvas {colors['bg_base']}  accent {colors['accent_user']}",
+            flush=True,
+        )
+        return
+
+    upstream = ensure_upstream(binary)
+    patched = patch_buffer(upstream.read_bytes(), colors)
+    write_atomic(binary, patched, mode=0o755)
+    print(
+        f"omarchy grok theme  canvas {colors['bg_base']}  accent {colors['accent_user']}",
+        flush=True,
+    )
+
+
+if __name__ == "__main__":
+    main()

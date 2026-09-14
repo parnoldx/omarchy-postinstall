@@ -1,0 +1,469 @@
+#!/usr/bin/env bash
+# Cursor-aware text expander for Hyprland/Omarchy, chord-expander model.
+#
+# Trigger:  leader (SUPER + E) -> Hyprland submap -> type a 1-5 char trigger.
+#           Fires the instant the buffer uniquely matches a trigger; press
+#           RETURN to fire a trigger that is also a prefix of a longer one,
+#           BACKSPACE to correct, ESCAPE to cancel.
+# Manager:  leader then leader again -> fuzzy picker (omarchy-menu-select).
+#
+# The submap is written ONCE by `chord-expander install`. Snippets live in
+# snippets.json and are read at match time, so adding/editing/removing a
+# snippet never regenerates config and never needs `hyprctl reload`.
+
+set -euo pipefail
+
+STATE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/chord-expander"
+CONFIG_FILE="$STATE_DIR/snippets.json"
+SUBMAP_FILE="$STATE_DIR/submap.lua"
+HYPR_BINDINGS="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/bindings.lua"
+INCLUDE_LINE='pcall(dofile, os.getenv("HOME") .. "/.config/chord-expander/submap.lua")'
+CURSOR_MARKER='$'
+SUBMAP_NAME="chord-expander"
+TRIGGER_RE='^[A-Za-z0-9]{1,5}$'
+BUF_DIR="${XDG_RUNTIME_DIR:-/tmp}"
+BUF_FILE="$BUF_DIR/chord-expander.buf"
+BUF_LOCK="$BUF_DIR/chord-expander.lock"
+BUF_STALE_SECS=3
+
+CLIPBOARD_FILE=""
+CLIPBOARD_TYPE=""
+PASTE_CLIPBOARD_ACTIVE=false
+
+die() { printf 'chord-expander: %s\n' "$*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"; }
+
+ensure_config() {
+  mkdir -p "$STATE_DIR"
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    cat > "$CONFIG_FILE" <<'JSON'
+{
+  "version": 1,
+  "leader": "SUPER + E",
+  "snippets": {
+    "E": { "name": "Email", "text": "you@example.com" },
+    "S": { "name": "Shrug", "text": "¯\\_(ツ)_/¯" }
+  }
+}
+JSON
+  fi
+}
+
+validate_config() {
+  ensure_config
+  jq -e '
+    (.snippets | type == "object") and
+    ([.snippets | to_entries[] |
+      (.key | test("^[A-Za-z0-9]{1,5}$")) and
+      (.value.name | type == "string" and length > 0) and
+      (.value.text | type == "string")
+    ] | all)
+  ' "$CONFIG_FILE" >/dev/null || die "invalid config: $CONFIG_FILE"
+}
+
+# ---------------------------------------------------------------------------
+# install: static submap, written once
+# ---------------------------------------------------------------------------
+
+generate_submap() {
+  local leader
+  leader="$(jq -r '.leader // "SUPER + E"' "$CONFIG_FILE")"
+  local self="$HOME/.local/bin/chord-expander"
+  cat > "$SUBMAP_FILE" <<LUA
+-- Generated once by \`chord-expander install\`. Safe to leave alone.
+-- Snippets: $CONFIG_FILE (read at match time, no reload needed).
+--
+-- Buffered model: each key runs \`chord-expander feed <KEY>\`, which
+-- accumulates a trigger buffer in $BUF_FILE and decides whether to fire,
+-- keep waiting, or bail. The submap only leaves when feed says so, so the
+-- handlers here never dispatch a reset themselves.
+
+local BIN = "$self"
+
+o.bind("$leader", "Chord expander", hl.dsp.submap("$SUBMAP_NAME"))
+
+-- 2-arg form on purpose: the firstpick.keybindings plugin wraps
+-- hl.define_submap and mangles the 3-arg ("reset") variant.
+hl.define_submap("$SUBMAP_NAME", function()
+  hl.bind("ESCAPE",    function() hl.exec_cmd(BIN .. " feed --cancel") end)
+  hl.bind("RETURN",    function() hl.exec_cmd(BIN .. " feed --commit") end)
+  hl.bind("BACKSPACE", function() hl.exec_cmd(BIN .. " feed --back") end)
+  hl.bind("$leader",   function() hl.exec_cmd(BIN .. " feed --pick") end)
+  for key in ("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"):gmatch(".") do
+    hl.bind(key, function() hl.exec_cmd(BIN .. " feed " .. key) end)
+  end
+end)
+LUA
+}
+
+cmd_install() {
+  need jq
+  ensure_config
+  [[ -n "${1:-}" ]] && {
+    local tmp; tmp="$(mktemp "$STATE_DIR/snippets.json.XXXXXX")"
+    jq --arg l "$1" '.leader = $l' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+  }
+  generate_submap
+
+  touch "$HYPR_BINDINGS"
+  if ! grep -Fq -- "$INCLUDE_LINE" "$HYPR_BINDINGS"; then
+    printf '\n-- chord-expander (snippet expander)\n%s\n' "$INCLUDE_LINE" >> "$HYPR_BINDINGS"
+    printf 'Added include to %s\n' "$HYPR_BINDINGS"
+  fi
+
+  if command -v hyprctl >/dev/null 2>&1; then
+    hyprctl reload >/dev/null || true
+    local errors; errors="$(hyprctl configerrors 2>/dev/null || true)"
+    [[ -z "$errors" || "$errors" == "no errors" ]] || die "Hyprland rejected the config:\n$errors"
+  fi
+  printf 'Installed. Press %s, then type a trigger. %s twice opens the picker.\n' \
+    "$(jq -r '.leader' "$CONFIG_FILE")" "$(jq -r '.leader' "$CONFIG_FILE")"
+}
+
+cmd_uninstall() {
+  if [[ -f "$HYPR_BINDINGS" ]] && grep -Fq -- "$INCLUDE_LINE" "$HYPR_BINDINGS"; then
+    local tmp; tmp="$(mktemp "$(dirname "$HYPR_BINDINGS")/bindings.lua.XXXXXX")"
+    grep -vF -- "$INCLUDE_LINE" "$HYPR_BINDINGS" | grep -vF -- '-- chord-expander (snippet expander)' > "$tmp"
+    mv "$tmp" "$HYPR_BINDINGS"
+  fi
+  rm -f "$SUBMAP_FILE"
+  command -v hyprctl >/dev/null 2>&1 && hyprctl reload >/dev/null || true
+  printf 'Removed Hyprland include. Snippets preserved at %s\n' "$CONFIG_FILE"
+}
+
+# ---------------------------------------------------------------------------
+# clipboard + paste engine (ported from omarchy-chord-expander)
+# ---------------------------------------------------------------------------
+
+clipboard_save() {
+  command -v wl-copy >/dev/null 2>&1 || return 1
+  command -v wl-paste >/dev/null 2>&1 || return 1
+  local types
+  CLIPBOARD_FILE="$(mktemp)"
+  CLIPBOARD_TYPE=""
+  types="$(wl-paste --list-types 2>/dev/null || true)"
+  if [[ -n "$types" ]]; then
+    CLIPBOARD_TYPE="$(printf '%s\n' "$types" | head -n 1)"
+    wl-paste --type "$CLIPBOARD_TYPE" > "$CLIPBOARD_FILE" 2>/dev/null || CLIPBOARD_TYPE=""
+  fi
+}
+
+clipboard_restore() {
+  if [[ -n "$CLIPBOARD_TYPE" ]]; then
+    wl-copy --type "$CLIPBOARD_TYPE" < "$CLIPBOARD_FILE"
+  else
+    wl-copy --clear
+  fi
+  rm -f "$CLIPBOARD_FILE"
+  CLIPBOARD_FILE=""
+  CLIPBOARD_TYPE=""
+}
+
+clipboard_read_text() {
+  local guard value
+  guard=$'\x1e'
+  value="$( { wl-paste --type text/plain 2>/dev/null || true; printf '%s' "$guard"; } )"
+  printf '%s' "${value%"$guard"}"
+}
+
+clipboard_wait_for_text() {
+  local expected=$1 actual attempt
+  for ((attempt = 0; attempt < 50; attempt++)); do
+    actual="$(clipboard_read_text)"
+    [[ "$actual" == "$expected" ]] && return 0
+    sleep 0.02
+  done
+  return 1
+}
+
+clipboard_wait_for_type() {
+  local expected=$1 mode=${2:-present} max_attempts=${3:-50} types attempt
+  for ((attempt = 0; attempt < max_attempts; attempt++)); do
+    types="$(wl-paste --list-types 2>/dev/null || true)"
+    if [[ "$mode" == present ]] && grep -Fxq -- "$expected" <<< "$types"; then
+      return 0
+    elif [[ "$mode" == absent ]] && ! grep -Fxq -- "$expected" <<< "$types"; then
+      return 0
+    fi
+    sleep 0.02
+  done
+  return 1
+}
+
+active_window_is_terminal() {
+  command -v hyprctl >/dev/null 2>&1 || return 1
+  hyprctl activewindow -j 2>/dev/null |
+    jq -e 'any(.tags[]?; sub("\\*$"; "") == "terminal")' >/dev/null 2>&1
+}
+
+send_clipboard_shortcut() {
+  local action=$1 mods key
+  if active_window_is_terminal; then
+    if [[ "$action" == copy ]]; then mods="CTRL"; key="Insert"; else mods="SHIFT"; key="Insert"; fi
+  else
+    mods="CTRL"
+    if [[ "$action" == copy ]]; then key="C"; else key="V"; fi
+  fi
+  hyprctl eval "hl.dispatch(hl.dsp.send_key_state({ mods = \"$mods\", key = \"$key\", state = \"down\" }))" >/dev/null
+  sleep 0.05
+  hyprctl eval "hl.dispatch(hl.dsp.send_key_state({ mods = \"$mods\", key = \"$key\", state = \"up\" }))" >/dev/null
+}
+
+paste_text() {
+  local text=$1 clipboard_saved=${2:-false}
+  PASTE_CLIPBOARD_ACTIVE=false
+  if ! command -v wl-copy >/dev/null 2>&1 ||
+     ! command -v wl-paste >/dev/null 2>&1 ||
+     ! command -v hyprctl >/dev/null 2>&1; then
+    printf '%s' "$text" | wtype -
+    return
+  fi
+  if [[ "$clipboard_saved" != true ]]; then
+    clipboard_save || { printf '%s' "$text" | wtype -; return; }
+  fi
+  printf '%s' "$text" | wl-copy --type text/plain
+  clipboard_wait_for_text "$text" || { clipboard_restore; printf '%s' "$text" | wtype -; return; }
+  send_clipboard_shortcut paste
+  PASTE_CLIPBOARD_ACTIVE=true
+}
+
+capture_selection() {
+  local -n result=$1
+  result=""
+  command -v wl-copy >/dev/null 2>&1 || return 1
+  command -v wl-paste >/dev/null 2>&1 || return 1
+  command -v hyprctl >/dev/null 2>&1 || return 1
+  local marker_type copied
+  marker_type="application/x-chord-expander-probe"
+  printf 'probe' | wl-copy --type "$marker_type"
+  clipboard_wait_for_type "$marker_type" present || return 1
+  send_clipboard_shortcut copy
+  clipboard_wait_for_type "$marker_type" absent 6 || return 1
+  copied="$(clipboard_read_text)"
+  [[ -n "$copied" ]] || return 1
+  result="$copied"
+}
+
+expand_snippet() {
+  need jq
+  need wtype
+  validate_config
+  local key text encoded before after left_count sentinel selection clipboard_saved
+  key="${1:-}"
+  key="${key^^}"
+  text="$(jq -er --arg key "$key" '.snippets[$key].text' "$CONFIG_FILE" 2>/dev/null)" || {
+    command -v notify-send >/dev/null 2>&1 &&
+      notify-send -u low -t 1200 "chord-expander" "no snippet on '$key'" || true
+    exit 0
+  }
+
+  sentinel=$'\x1f'
+  encoded="${text//\$\$/$sentinel}"
+  clipboard_saved=false
+  if [[ "$encoded" == *"$CURSOR_MARKER"* ]]; then
+    before="${encoded%%"$CURSOR_MARKER"*}"
+    after="${encoded#*"$CURSOR_MARKER"}"
+    before="${before//$sentinel/\$}"
+    after="${after//$sentinel/\$}"
+    selection=""
+    if clipboard_save; then clipboard_saved=true; fi
+    if [[ "$clipboard_saved" == true ]] && capture_selection selection; then
+      text="$before$selection$after"
+    else
+      text="$before$after"
+    fi
+    left_count="$(printf '%s' "$after" | wc -m)"
+  else
+    text="${encoded//$sentinel/\$}"
+    left_count=0
+  fi
+
+  paste_text "$text" "$clipboard_saved"
+  if ((left_count > 0)); then
+    local -a cursor_keys=()
+    for ((i = 0; i < left_count; i++)); do cursor_keys+=(-k Left); done
+    wtype "${cursor_keys[@]}"
+  fi
+  if [[ "$PASTE_CLIPBOARD_ACTIVE" == true ]]; then
+    sleep 0.25
+    clipboard_restore
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# feed: buffered trigger matching, driven by the submap key binds
+# ---------------------------------------------------------------------------
+
+submap_reset() { hyprctl dispatch "hl.dsp.submap('reset')" >/dev/null 2>&1 || true; }
+
+# The only toast: fired when the typed buffer can't lead to any trigger.
+# Silent while waiting and on cancel, so a correct chord is noise-free.
+miss() {
+  command -v notify-send >/dev/null 2>&1 || return 0
+  notify-send -u low -t 1200 -h string:x-canonical-private-synchronous:chord-expander \
+    "chord-expander: no match for “${1:-∅}”" 2>/dev/null || true
+}
+
+_has_exact()   { jq -e --arg k "$1" '.snippets | has($k)' "$CONFIG_FILE" >/dev/null 2>&1; }
+_has_longer()  { jq -e --arg p "$1" '[.snippets | keys[] | select(. != $p and startswith($p))] | length > 0' "$CONFIG_FILE" >/dev/null 2>&1; }
+_max_trigger() { jq -r '[.snippets | keys[] | length] | max // 1' "$CONFIG_FILE" 2>/dev/null; }
+
+cmd_feed() {
+  need jq
+  validate_config
+  local arg="${1:-}"
+
+  # ponytail: each keypress spawns its own feed process; flock serialises them
+  # but not their order. Human typing after the leader is ~100ms/key vs ~ms
+  # spawn latency, so out-of-order arrival is negligible. The staleness reset
+  # below also bounds any damage. Upgrade path: a single long-lived reader.
+  exec 9>"$BUF_LOCK"
+  flock -x 9
+
+  local cur=""
+  if [[ -f "$BUF_FILE" ]]; then
+    cur="$(<"$BUF_FILE")"
+    local age=$(( $(date +%s) - $(stat -c %Y "$BUF_FILE" 2>/dev/null || echo 0) ))
+    if (( age >= BUF_STALE_SECS )); then cur=""; fi
+  fi
+
+  case "$arg" in
+    --cancel)
+      : > "$BUF_FILE"; submap_reset; exit 0 ;;
+    --pick)
+      : > "$BUF_FILE"; submap_reset; flock -u 9; exec "$0" pick ;;
+    --back)
+      cur="${cur%?}"
+      if [[ -z "$cur" ]]; then : > "$BUF_FILE"; submap_reset; else printf '%s' "$cur" > "$BUF_FILE"; fi
+      exit 0 ;;
+    --commit)
+      if [[ -n "$cur" ]] && _has_exact "$cur"; then
+        : > "$BUF_FILE"; submap_reset; flock -u 9; sleep 0.05; expand_snippet "$cur"; exit 0
+      fi
+      : > "$BUF_FILE"; submap_reset; miss "$cur"; exit 0 ;;
+    [A-Za-z0-9])
+      cur="${cur}${arg^^}" ;;
+    *)
+      : > "$BUF_FILE"; submap_reset; exit 0 ;;
+  esac
+
+  local maxlen; maxlen="$(_max_trigger)"; maxlen="${maxlen:-5}"
+  if (( ${#cur} > maxlen )); then
+    : > "$BUF_FILE"; submap_reset; miss "$cur"; exit 0
+  fi
+
+  if _has_longer "$cur"; then
+    # Buffer is (also) a prefix of a longer trigger: wait for RETURN or more keys.
+    printf '%s' "$cur" > "$BUF_FILE"; exit 0
+  elif _has_exact "$cur"; then
+    : > "$BUF_FILE"; submap_reset; flock -u 9; sleep 0.05; expand_snippet "$cur"; exit 0
+  else
+    : > "$BUF_FILE"; submap_reset; miss "$cur"; exit 0
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# picker + management (no config regen)
+# ---------------------------------------------------------------------------
+
+cmd_pick() {
+  need jq
+  validate_config
+  command -v omarchy-menu-select >/dev/null 2>&1 || die "omarchy-menu-select not found"
+  # omarchy-menu-select treats TABs as glyph/label/subtext separators and never
+  # returns the glyph, so keep each row a single tab-free label and recover the
+  # key from its first token.
+  local choice key
+  choice="$(jq -r '.snippets | to_entries | sort_by(.key)[] |
+    "\(.key)   \(.value.name)  —  \(.value.text | gsub("\\s+"; " ") | .[0:60])"' "$CONFIG_FILE" |
+    omarchy-menu-select 'Snippets' -- --width 700 --height 460)" || exit 0
+  [[ -n "$choice" ]] || exit 0
+  key="${choice%% *}"
+  [[ "$key" =~ $TRIGGER_RE ]] || exit 0
+  sleep 0.12
+  expand_snippet "$key"
+}
+
+cmd_list() {
+  need jq
+  ensure_config
+  jq -r '.snippets | to_entries | sort_by(.key)[] |
+    "  \(.key)  \(.value.name)  —  \(.value.text | gsub("\n"; "\\n") | .[0:50])"' "$CONFIG_FILE"
+}
+
+cmd_add() {
+  need jq
+  ensure_config
+  local key="${1:-}" name="${2:-}" text
+  [[ "$key" =~ $TRIGGER_RE ]] || die "usage: chord-expander add <1-5 of A-Z 0-9> <name>  (body on stdin)"
+  [[ -n "$name" ]] || die "name required"
+  key="${key^^}"
+  if [[ -t 0 ]]; then die "pipe the snippet body on stdin, e.g. echo -n 'text' | chord-expander add X Name"; fi
+  text="$(cat)"
+  local tmp; tmp="$(mktemp "$STATE_DIR/snippets.json.XXXXXX")"
+  jq --arg k "$key" --arg n "$name" --arg t "$text" \
+    '.snippets[$k] = {name: $n, text: $t}' "$CONFIG_FILE" > "$tmp"
+  mv "$tmp" "$CONFIG_FILE"
+  printf 'saved %s = %s\n' "$key" "$name"
+}
+
+cmd_rm() {
+  need jq
+  ensure_config
+  local key="${1:-}"
+  [[ "$key" =~ $TRIGGER_RE ]] || die "usage: chord-expander rm <1-5 of A-Z 0-9>"
+  key="${key^^}"
+  local tmp; tmp="$(mktemp "$STATE_DIR/snippets.json.XXXXXX")"
+  jq --arg k "$key" 'del(.snippets[$k])' "$CONFIG_FILE" > "$tmp"
+  mv "$tmp" "$CONFIG_FILE"
+  printf 'removed %s\n' "$key"
+}
+
+cmd_edit() {
+  ensure_config
+  ${EDITOR:-vi} "$CONFIG_FILE"
+}
+
+usage() {
+  cat <<EOF
+Usage: chord-expander <command>
+
+  install [leader]   Write the static Hyprland submap + include line (once).
+                     leader defaults to "SUPER + E".
+  uninstall          Remove the include line (keeps snippets).
+  feed <KEY|--flag>  Buffered trigger step, called by the submap key binds
+                     (--commit on RETURN, --back on BACKSPACE, --cancel on
+                     ESCAPE, --pick on the leader).
+  expand <TRIGGER>   Insert a snippet directly by its full trigger.
+  pick               Fuzzy-pick a snippet and insert it (leader, then leader).
+  list               List snippets.
+  add <TRIGGER> <name>  Add/replace a snippet; body read from stdin.
+                        TRIGGER is 1-5 of A-Z 0-9.
+  rm <TRIGGER>       Delete a snippet.
+  edit               Open snippets.json in \$EDITOR.
+  path               Print the snippets.json path.
+
+Triggers: 1-5 alphanumerics. A trigger fires the instant the typed buffer
+uniquely matches it; if it is also the prefix of a longer trigger, press
+RETURN to fire the shorter one.
+
+Cursor marker: a single \$ in a snippet marks the final cursor position;
+\$\$ is a literal \$. If text is selected, \$ receives it (e.g. "[\$]" wraps).
+EOF
+}
+
+cmd="${1:-}"
+case "$cmd" in
+  install)   shift; cmd_install "${1:-}" ;;
+  uninstall) cmd_uninstall ;;
+  feed)      shift; cmd_feed "${1:-}" ;;
+  expand)    shift; expand_snippet "${1:-}" ;;
+  pick)      cmd_pick ;;
+  list)      cmd_list ;;
+  add)       shift; cmd_add "$@" ;;
+  rm)        shift; cmd_rm "${1:-}" ;;
+  edit)      cmd_edit ;;
+  path)      ensure_config; printf '%s\n' "$CONFIG_FILE" ;;
+  -h|--help|help|"") usage ;;
+  *) usage >&2; exit 2 ;;
+esac

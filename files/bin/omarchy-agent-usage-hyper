@@ -1,0 +1,342 @@
+#!/usr/bin/python3
+# Collect Pi's Hyper-provider usage into the official omarchy.agents record contract.
+# Prints one JSON object. With --write, also stores it where the panel watches:
+#   ~/.local/state/omarchy/agents/usage/hyper.json
+"""Collect Pi (Charm Hyper provider) usage into one display-ready JSON record.
+
+Balance comes from Hyper's /v1/credits endpoint (the same one the
+@charmland/pi-hyper-provider extension polls for its status-line
+Hypercredit figure), authenticated with the API key Pi already stored in
+~/.pi/agent/auth.json. Prompt/session/token stats come from Pi's own
+session transcripts under ~/.pi/agent/sessions, counting only the
+assistant turns whose provider is "hyper" -- Pi is used with several
+providers, and the other ones already have their own collectors (or their
+own billing dashboards) so this stays scoped to the Hyper spend the user
+asked to see. The agents panel only ever reads the JSON this prints.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import tempfile
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+AGENT_ID = "hyper"
+AGENT_NAME = "Hyper"
+PROVIDER_FILTER = "hyper"
+HYPER_API_BASE_URL = "https://hyper.charm.land/v1"
+AUTH_HELP = "Run `pi`, then `/login` -> Subscription -> Charm Hyper, or set HYPER_API_KEY."
+
+# Charm's API exposes only the running balance — no refill schedule or grant
+# size anywhere (checked /credits, /usage, /limits, /subscription: 404s). The
+# daily 23:33 reset to a 250 HC grant is user-observed; the panel uses these
+# to draw the countdown and the spent meter.
+DAILY_REFILL_TIME = dt.time(23, 33)
+DAILY_GRANT_HC = 250.0
+
+
+def next_refill() -> str:
+  """ISO timestamp of the next daily credit refill (local wall clock)."""
+  now = dt.datetime.now().astimezone()
+  target = now.replace(hour=DAILY_REFILL_TIME.hour, minute=DAILY_REFILL_TIME.minute,
+                       second=0, microsecond=0)
+  if target <= now:
+    target += dt.timedelta(days=1)
+  return target.isoformat()
+
+
+def expand_path(value: str) -> Path:
+  return Path(os.path.expandvars(os.path.expanduser(value))).resolve()
+
+
+def pi_agent_dir() -> Path:
+  return expand_path(os.environ.get("PI_HOME") or "~/.pi") / "agent"
+
+
+def usage_dir() -> Path:
+  root = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "omarchy" / "agents" / "usage"
+  root.mkdir(parents=True, exist_ok=True)
+  return root
+
+
+def date_string(value: dt.date) -> str:
+  return value.strftime("%Y-%m-%d")
+
+
+def local_date_string() -> str:
+  return date_string(dt.datetime.now().date())
+
+
+def recent_date_strings() -> list[str]:
+  today = dt.datetime.now().date()
+  return [date_string(today - dt.timedelta(days=offset)) for offset in range(6, -1, -1)]
+
+
+def number(value: Any) -> int:
+  try:
+    n = float(value or 0)
+    return round(n) if n == n else 0
+  except Exception:
+    return 0
+
+
+def write_json(path: Path, payload: Any, mode: int = 0o644) -> None:
+  handle_fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+  tmp = Path(tmp_name)
+  try:
+    with os.fdopen(handle_fd, "w", encoding="utf-8") as handle:
+      handle.write(json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n")
+    tmp.chmod(mode)
+    tmp.replace(path)
+  except BaseException:
+    tmp.unlink(missing_ok=True)
+    raise
+
+
+# ---------------------------------------------------------------- local scan
+
+
+def empty_bucket() -> dict[str, int]:
+  return {
+    "inputTokens": 0,
+    "outputTokens": 0,
+    "cacheReadInputTokens": 0,
+    "cacheCreationInputTokens": 0,
+  }
+
+
+def scan_sessions(sessions_dir: Path) -> dict[str, Any]:
+  today = local_date_string()
+  recent_dates = recent_date_strings()
+  recent = {day: {"date": day, "messageCount": 0} for day in recent_dates}
+  sessions: set[str] = set()
+  active_days: set[str] = set()
+  today_sessions: set[str] = set()
+  today_tokens: dict[str, int] = {}
+  usage_by_model: dict[str, dict[str, int]] = {}
+  prompts = 0
+  today_prompt_count = 0
+  today_token_total = 0
+
+  files = sessions_dir.rglob("*.jsonl") if sessions_dir.is_dir() else []
+  for path in files:
+    session_id = str(path)
+    try:
+      with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+          if '"type":"message"' not in line and '"type": "message"' not in line:
+            continue
+          try:
+            entry = json.loads(line)
+          except Exception:
+            continue
+          if entry.get("type") != "message":
+            continue
+          message = entry.get("message")
+          if not isinstance(message, dict):
+            continue
+          if message.get("role") != "assistant" or message.get("provider") != PROVIDER_FILTER:
+            continue
+          usage = message.get("usage")
+          if not isinstance(usage, dict):
+            continue
+
+          stamp = entry.get("timestamp") or message.get("timestamp")
+          try:
+            day = date_string(dt.datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).date())
+          except Exception:
+            day = today
+
+          model = str(message.get("model") or PROVIDER_FILTER)
+          input_tokens = number(usage.get("input"))
+          output_tokens = number(usage.get("output")) + number(usage.get("reasoning"))
+          cache_read = number(usage.get("cacheRead"))
+          cache_write = number(usage.get("cacheWrite"))
+          total = number(usage.get("totalTokens")) or (input_tokens + output_tokens + cache_read + cache_write)
+          if total <= 0:
+            continue
+
+          bucket = usage_by_model.setdefault(model, empty_bucket())
+          bucket["inputTokens"] += input_tokens
+          bucket["outputTokens"] += output_tokens
+          bucket["cacheReadInputTokens"] += cache_read
+          bucket["cacheCreationInputTokens"] += cache_write
+          if day == today:
+            today_tokens[model] = today_tokens.get(model, 0) + total
+
+          prompts += 1
+          sessions.add(session_id)
+          active_days.add(day)
+          if day in recent:
+            recent[day]["messageCount"] += total
+          if day == today:
+            today_prompt_count += 1
+            today_sessions.add(session_id)
+            today_token_total += total
+    except OSError:
+      continue
+
+  return {
+    "todayPrompts": today_prompt_count,
+    "todaySessions": len(today_sessions),
+    "todayTotalTokens": today_token_total,
+    "todayTokensByModel": today_tokens,
+    "recentDays": [recent[day] for day in recent_dates],
+    "totalPrompts": prompts,
+    "totalSessions": len(sessions),
+    "activeDays": len(active_days),
+    "activeDates": sorted(active_days),
+    "modelUsage": usage_by_model,
+  }
+
+
+# ------------------------------------------------------------------- balance
+
+
+def load_api_key(agent_dir: Path) -> str | None:
+  env_key = os.environ.get("HYPER_API_KEY", "").strip()
+  if env_key:
+    return env_key
+  try:
+    data = json.loads((agent_dir / "auth.json").read_text(encoding="utf-8"))
+  except Exception:
+    return None
+  entry = data.get(PROVIDER_FILTER) if isinstance(data, dict) else None
+  if not isinstance(entry, dict):
+    return None
+  key = str(entry.get("key") or "").strip()
+  return key or None
+
+
+def fetch_balance(api_key: str) -> dict[str, Any]:
+  request = urllib.request.Request(
+    HYPER_API_BASE_URL + "/credits",
+    headers={
+      "Authorization": "Bearer " + api_key,
+      "Content-Type": "application/json",
+      "User-Agent": "omarchy-agent-usage-hyper/1.0",
+    },
+  )
+  try:
+    with urllib.request.urlopen(request, timeout=15) as response:
+      payload = json.loads(response.read().decode("utf-8", errors="replace"))
+  except urllib.error.HTTPError as error:
+    return {"ok": False, "status": error.code}
+  except Exception:
+    return {"ok": False, "transport": True}
+  if not isinstance(payload, dict):
+    return {"ok": False}
+  balance = payload.get("balance")
+  if balance is None:
+    balance = payload.get("balance_usd")
+  try:
+    return {"ok": True, "balance": float(balance)}
+  except (TypeError, ValueError):
+    return {"ok": False}
+
+
+def last_known_balance():
+  """Previous record's balance, or None. A transient network failure must not
+  blank the panel: the timer fires right after resume, before the network is
+  up, and a slowly-changing credit figure is better carried forward than
+  wiped. The next successful fetch overwrites it."""
+  try:
+    data = json.loads((usage_dir() / "hyper.json").read_text(encoding="utf-8"))
+  except Exception:
+    return None
+  balance = data.get("balance") if isinstance(data, dict) else None
+  return balance if isinstance(balance, dict) and balance.get("remaining") is not None else None
+
+
+def collect_balance() -> dict[str, Any]:
+  result: dict[str, Any] = {"balance": None, "usageStatusText": "", "authHelpText": AUTH_HELP}
+  api_key = load_api_key(pi_agent_dir())
+  if api_key is None:
+    result["usageStatusText"] = "Waiting for auth"
+    return result
+
+  probe = fetch_balance(api_key)
+  if probe.get("transport"):
+    result["usageStatusText"] = "Hyper balance unavailable"
+    result["authHelpText"] = "Couldn't reach Hyper's usage endpoint. Local Pi stats are still shown."
+    result["retryAdvised"] = True
+    stale = last_known_balance()
+    if stale is not None:
+      result["balance"] = stale
+      result["usageStatusText"] = ""
+      result["authHelpText"] = ""
+    return result
+  if probe.get("status") in (401, 403):
+    result["usageStatusText"] = "Sign-in expired"
+    result["authHelpText"] = "Hyper rejected the saved key. " + AUTH_HELP
+    return result
+  if not probe.get("ok"):
+    result["usageStatusText"] = "Hyper balance unavailable"
+    return result
+
+  result["balance"] = probe["balance"]
+  result["authHelpText"] = ""
+  return result
+
+
+def build_record(stats: dict[str, Any], balance_info: dict[str, Any]) -> dict[str, Any]:
+  # The API only gives the running balance, so the daily limit is derived:
+  # 100% = the 250 HC grant used up. The panel renders this like any other
+  # provider's limit row — meter, percentage, and the reset countdown.
+  limits = []
+  if balance_info.get("balance") is not None:
+    used = max(0.0, DAILY_GRANT_HC - balance_info["balance"])
+    limits = [{
+      "label": "Daily",
+      "percent": max(0.0, min(1.0, used / DAILY_GRANT_HC)),
+      "resetsAt": next_refill(),
+    }]
+  record = {
+    "schemaVersion": 1,
+    "id": AGENT_ID,
+    "name": AGENT_NAME,
+    "updatedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+    "ready": number(stats.get("totalPrompts")) > 0 or bool(limits),
+    "hasLocalStats": True,
+    "hasPromptStats": True,
+    "scope": "device",
+    "tierLabel": "",
+    "usageStatusText": balance_info.get("usageStatusText") or "",
+    "authHelpText": balance_info.get("authHelpText") or "",
+    "limits": limits,
+    "balance": None,
+  }
+  if balance_info.get("retryAdvised"):
+    record["retryAdvised"] = True
+  record.update(stats)
+  return record
+
+
+def main() -> int:
+  parser = argparse.ArgumentParser(description="Print the Pi (Hyper) usage record as JSON")
+  parser.add_argument("--force", action="store_true")
+  parser.add_argument("--limits-only", action="store_true")
+  parser.add_argument("--write", action="store_true", help="also write ~/.local/state/omarchy/agents/usage/hyper.json")
+  args = parser.parse_args()
+
+  # --limits-only exists so the update loop can cheapen a retry after a
+  # network hiccup; it only bears on the balance probe above; nothing here
+  # caches, so a fresh scan every call keeps local stats correct on disk
+  # rather than the --write path ever overwriting them with zeros.
+  balance_info = collect_balance()
+  stats = scan_sessions(pi_agent_dir() / "sessions")
+  record = build_record(stats, balance_info)
+  if args.write:
+    write_json(usage_dir() / "hyper.json", record, 0o600)
+  print(json.dumps(record, separators=(",", ":"), sort_keys=True))
+  return 0
+
+
+if __name__ == "__main__":
+  raise SystemExit(main())

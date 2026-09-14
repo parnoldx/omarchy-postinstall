@@ -1,0 +1,7 @@
+[Unit]
+Description=Refresh hyprsunset sunrise/sunset profiles
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/hyprsunset-solar

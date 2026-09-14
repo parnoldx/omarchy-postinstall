@@ -1,0 +1,7 @@
+#!/bin/bash
+# Apply the Omarchy Grok theme template to the Grok TUI.
+# Colors come from ~/.config/omarchy/themed/grok.toml.tpl.
+
+set -euo pipefail
+
+exec "$HOME/.config/omarchy/bin/omarchy-theme-set-grok"

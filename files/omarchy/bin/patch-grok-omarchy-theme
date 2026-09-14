@@ -1,0 +1,4 @@
+#!/bin/bash
+# Back-compat wrapper. The Grok theme now lives in
+# ~/.config/omarchy/themed/grok.toml.tpl and is applied by omarchy-theme-set-grok.
+exec "$HOME/.config/omarchy/bin/omarchy-theme-set-grok" "$@"

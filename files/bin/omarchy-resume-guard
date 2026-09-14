@@ -1,0 +1,32 @@
+#!/bin/bash
+# After resume: if the Omarchy shell's IPC is dead, restart it.
+# Does not lock a healthy unlocked session — that is usually the user
+# already unlocking, not an exposed suspend.
+
+set -u
+
+probe() { timeout 3 omarchy-shell lock status >/dev/null 2>&1; }
+
+check_shell() {
+  sleep 15
+  probe && return 0
+  for _ in 1 2 3; do
+    sleep 5
+    probe && return 0
+  done
+
+  logger -t omarchy-resume-guard "shell unresponsive after resume; restarting"
+  omarchy restart shell || true
+  # Unsecured suspend left Hyprland unlocked; restart-shell only re-locks
+  # when the compositor still holds the failsafe. Harmless if already locked.
+  timeout 3 omarchy-shell lock lock >/dev/null 2>&1 || true
+}
+
+[[ ${1:-} == "--probe" ]] && { probe; exit $?; }
+
+dbus-monitor --system \
+  "type='signal',sender='org.freedesktop.login1',interface='org.freedesktop.login1.Manager',member='PrepareForSleep'" |
+while IFS= read -r line; do
+  [[ $line == *"boolean false"* ]] || continue
+  check_shell
+done

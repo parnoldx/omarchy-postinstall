@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Name=CAD Assistant
+Comment=Open CASCADE CAD Assistant - viewer for 3D models
+Exec=env DESKTOPINTEGRATION=false QT_QPA_PLATFORM=xcb /usr/bin/cadassistant %U
+StartupWMClass=CADAssistant
+Icon=cadassistant
+Terminal=false
+Type=Application
+Categories=Graphics;3DGraphics;
+Keywords=3D;View;
+MimeType=model/step;model/iges;model/gltf+json;model/gltf.binary;application/vnd.ms-pki.stl;model/x.stl-ascii;model/x.stl-binary;application/x-wavefront-obj;model/x-xbf;model/x-brep;model/x-ply;
+X-AppImage-Version=1.6.0.0

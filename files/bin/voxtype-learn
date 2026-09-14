@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Teach voxtype a correction — uses the NATIVE text.replacements config,
+# so everything is visible/editable in `voxtype configure` too.
+#   voxtype-learn <misheard> <correct>   learn/replace a correction
+#   voxtype-learn list                   show all corrections
+#   voxtype-learn forget <misheard>      remove one
+# Each change restarts the daemon (~2s) — that's the price of native config.
+set -e
+cfg="$HOME/.config/voxtype/config.toml"
+
+case "${1:-}" in
+  list)   sed -n '/^\[text\.replacements\]/,/^$/p' "$cfg" | sed '1d' | grep '=' | sed 's/^/  /'; exit 0;;
+  forget) [ -n "${2:-}" ] || { echo "usage: voxtype-learn forget <misheard>" >&2; exit 2; }
+          voxtype config unset "text.replacements.$2" && systemctl --user restart voxtype
+          echo "forgot: $2"; exit 0;;
+esac
+[ $# -eq 2 ] || { echo "usage: voxtype-learn <misheard> <correct> | list | forget <misheard>" >&2; exit 2; }
+
+voxtype config set "text.replacements.$1" "$2" && systemctl --user restart voxtype
+echo "learned: '$1' -> '$2'  (saved to config.toml, active now)"

@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Export the latest voxtype meeting as markdown, have the default agent
+# summarize it, and open the summary. Called from the Omavoice panel.
+set -euo pipefail
+
+DIR="$HOME/Documents/Meetings"
+mkdir -p "$DIR"
+
+info=$(voxtype meeting list -l 1 2>/dev/null) || { notify-send "Omavoice" "voxtype meeting list failed"; exit 1; }
+id=$(sed -n 's/^\s*ID: //p' <<<"$info" | head -1)
+[[ -n "$id" ]] || { notify-send "Omavoice" "No meetings to export"; exit 1; }
+
+title=$(grep -vE '^\s*$|^Recent Meetings$|^\s*[-=]+\s*$|^\s*(ID|Date|Duration|Status):' <<<"$info" | sed -n '1s/^\s*//p' | head -1)
+[[ -n "$title" ]] || title="Meeting"
+stamp=$(sed -n 's/^\s*Date: //p' <<<"$info" | head -1 | tr ' :/' '--')
+base="${stamp:-$(date +%F-%H%M)} ${title//\// }"
+base=$(sed 's/[*?"|]/ /g; s/  */ /g; s/^ //; s/ $//' <<<"$base")
+out="$DIR/$base.md"
+
+voxtype meeting export "$id" --format markdown --speakers --timestamps --metadata -o "$out"
+voxtype meeting delete "$id" --force
+
+summary="$DIR/$base - summary.md"
+xdg-open "$out"
+
+if command -v pi >/dev/null 2>&1; then
+  prompt="You summarize meeting transcripts. The transcript below is markdown with speaker labels and timestamps. Output ONLY the summary as markdown with these sections: one-paragraph overview, then '## Decisions', '## Action Items' (as checkboxes '- [ ] person: task'), '## Open Questions'. Be concise; no preamble.
+
+Transcript:
+$(cat "$out")"
+  if pi -p --no-session --no-tools --no-skills --no-extensions --thinking off -- "$prompt" > "$summary" 2>/dev/null && [[ -s "$summary" ]]; then
+    xdg-open "$summary"
+  else
+    rm -f "$summary"
+    notify-send "Omavoice" "Agent summary failed — transcript is open"
+  fi
+fi

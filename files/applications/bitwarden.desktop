@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Bitwarden
+GenericName=Password Manager
+Comment=Fuzzy-find a vault entry and copy its password, username or TOTP code.
+Exec=xdg-terminal-exec --app-id=TUI.float -e rbw-tui
+Terminal=false
+Type=Application
+Icon=bitwarden
+Categories=Utility;
+StartupNotify=true

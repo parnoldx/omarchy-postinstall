@@ -1,0 +1,11 @@
+[Unit]
+Description=Apply hyprsunset sunrise profile and refresh the bar indicator
+
+[Timer]
+OnCalendar=*-*-* 06:57:00
+AccuracySec=1s
+Persistent=true
+Unit=hyprsunset-solar-apply.service
+
+[Install]
+WantedBy=timers.target

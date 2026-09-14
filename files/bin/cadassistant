@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Wrapper around the CAD Assistant AppImage (AUR: cadassistant-appimage).
+#
+# Its bundled 2021-era Qt5 fails under Wayland, so force XWayland;
+# DESKTOPINTEGRATION=false stops the AppImage from offering to integrate
+# itself into the menu again (the AUR package already did that).
+#
+# Lives in /usr/local/bin so it shadows /usr/bin/cadassistant while leaving
+# the pacman-owned symlink alone.
+
+exec env DESKTOPINTEGRATION=false QT_QPA_PLATFORM=xcb \
+  /opt/cadassistant-appimage/cadassistant-appimage.AppImage "$@"

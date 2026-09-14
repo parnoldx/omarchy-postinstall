@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Toggle Home Assistant lights from the Omarchy launcher.
+set -euo pipefail
+
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/homeassistant"
+URL_FILE="$CONF/url"
+TOKEN_FILE="$CONF/token"
+
+if [[ ! -r $URL_FILE || ! -r $TOKEN_FILE ]]; then
+  echo "Missing Home Assistant credentials in $CONF" >&2
+  exit 1
+fi
+
+URL=$(<"$URL_FILE")
+TOKEN=$(<"$TOKEN_FILE")
+URL=${URL//$'\r'/}
+URL=${URL//$'\n'/}
+TOKEN=${TOKEN//$'\r'/}
+TOKEN=${TOKEN//$'\n'/}
+URL=${URL%/}
+
+WOHNZIMMER="light.wohnzimmer"
+LESELICHT="switch.leselicht"
+SCHRANK="light.schrank"
+FLUR="light.flur"
+H6022="light.h6022"
+SOFATISCH="light.sofatisch"
+
+LICHT_LIGHTS=("$WOHNZIMMER" "$SCHRANK" "$FLUR" "$H6022" "$SOFATISCH")
+
+ha() {
+  curl -fsS -m 8 \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    "$@"
+}
+
+state_of() {
+  ha "$URL/api/states/$1" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state",""))'
+}
+
+call() {
+  local domain=$1 service=$2
+  shift 2
+  local payload
+  payload=$(python3 -c 'import json,sys; print(json.dumps({"entity_id": sys.argv[1:] if len(sys.argv)>2 else sys.argv[1]}))' "$@")
+  ha -X POST "$URL/api/services/$domain/$service" -d "$payload" >/dev/null
+}
+
+usage() {
+  echo "Usage: ha-licht {licht|leselicht|abdunkeln|status}" >&2
+  exit 1
+}
+
+case "${1:-}" in
+licht)
+  call light turn_on "${LICHT_LIGHTS[@]}"
+  call switch turn_on "$LESELICHT"
+  ;;
+leselicht)
+  call switch toggle "$LESELICHT"
+  ;;
+abdunkeln)
+  call light turn_off "$WOHNZIMMER"
+  call switch turn_off "$LESELICHT"
+  ;;
+status)
+  printf 'Wohnzimmer: %s\nLeselicht: %s\nSchrank: %s\nFlur: %s\nH6022: %s\nSofatisch: %s\n' \
+    "$(state_of "$WOHNZIMMER")" \
+    "$(state_of "$LESELICHT")" \
+    "$(state_of "$SCHRANK")" \
+    "$(state_of "$FLUR")" \
+    "$(state_of "$H6022")" \
+    "$(state_of "$SOFATISCH")"
+  ;;
+*)
+  usage
+  ;;
+esac

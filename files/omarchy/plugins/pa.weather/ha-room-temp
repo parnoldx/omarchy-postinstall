@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Print the Home Assistant state JSON for a temperature entity.
+set -euo pipefail
+
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/homeassistant"
+URL_FILE="$CONF/url"
+TOKEN_FILE="$CONF/token"
+
+if [[ ! -r $URL_FILE || ! -r $TOKEN_FILE ]]; then
+  echo "Missing Home Assistant credentials in $CONF" >&2
+  exit 1
+fi
+
+URL=$(<"$URL_FILE")
+TOKEN=$(<"$TOKEN_FILE")
+URL=${URL//$'\r'/}
+URL=${URL//$'\n'/}
+TOKEN=${TOKEN//$'\r'/}
+TOKEN=${TOKEN//$'\n'/}
+URL=${URL%/}
+
+ENTITY="${1:-sensor.tvr_temperature}"
+
+curl -fsS -m 5 \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  "$URL/api/states/$ENTITY"

@@ -1,0 +1,3 @@
+#!/bin/bash
+# Refresh Grok usage after the desktop starts so the agents panel has numbers.
+systemctl --user start omarchy-agent-usage-grok.service >/dev/null 2>&1 || true
