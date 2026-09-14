@@ -3,7 +3,7 @@
 Personal Omarchy post-install. Run it on a fresh box to apply Hyprland overlays, bar plugins (including `pa.agents`, a stacked-sections fork of the stock agents panel), mailbox (CLI, socket-activated daemon, `mailbox.clock` calendar widget, `mailbox.email` unread/screener widget), Voxtype dictation (CPU Parakeet via the `voxtype-bin` AUR package; Ctrl+F1 insert, Ctrl+Shift+F1 process-then-insert, Ctrl+F2 ask, Ctrl+Shift+F2 do, Ctrl+F3 learns a correction from the selected text), WhatsApp (`wacli` AUR mirror + `whatsapp-gui` from its own repo as a right-edge blade), Chromium/Edge video decode on the Intel iGPU (Omarchy's NVIDIA VAAPI freezes HTML5 players on this hybrid laptop), Home Assistant helpers, Grok/Hyper usage collectors, Grok theme sync, branding, Plymouth/SDDM Om unlock, default agent `pi`, VS Code as the editor (Omarchy launcher and Files), a Super+Ctrl+F fzf+yazi file finder, a `kill-tui` process killer, community bar plugins (Quick Look, Time Machine, Pocket, Omatree, YouTube Music, Basecamp, keybindings editor, Omavoice — installed via `omarchy plugin add`, stock `omarchy.menu` disabled in favor of `pa.menu`), `omatts` local TTS, `omavoice-meeting-export`, the slitherlink + sudoku games, and extra packages.
 
 Passwords run through `rbw` (unofficial Bitwarden client): Super+Shift+B (also the launcher Bitwarden entry and menu 󰢁 Passwörter) opens a fuzzy-finder TUI that copies password, username or TOTP. Bare `bw` opens the same picker; `bw <args>` forwards to rbw — the official bitwarden-cli stays installed but is shadowed on PATH. `vault-bridge` sits in as rbw's pinentry and as the Chrome native-messaging host, so that one master-password prompt also unlocks the Bitwarden extension (it speaks the extension's biometric protocol); its Qt Quick confirmation dialog lives in `~/.local/bin/vault-bridge-dialog/`. After install, turn on **Unlock with biometrics** in the extension Settings — do not enable the official Bitwarden desktop "Allow browser integration", which would overwrite the native-host manifest.
-Home Assistant credentials, the Shelly door-opener auth key, and a German PLZ are prompted (or passed as env vars) and written only on the target machine — nothing location-specific is stored in this repo. Your secrets, personal identity and snippets live in the separate, git-crypt-encrypted [`omarchy-private`](https://github.com/parnoldx/omarchy-private) overlay (applied last, if present — see below). The weather popup shows a rain radar only while rain is falling here or forecast today. Night light turns off at sunrise and on at sunset for that same weather location (`hyprsunset-solar.timer` recomputes the solar times daily; sunrise/sunset timers apply the profiles and refresh the bar indicator). The bar indicator is refreshed after resume, because Omarchy only re-reads hyprsunset when told.
+Home Assistant credentials, the Shelly door-opener auth key, and a German PLZ are prompted (or passed as env vars) and written only on the target machine — nothing location-specific is stored in this repo. Your secrets, personal identity and snippets live in the separate, git-crypt-encrypted [`-omarchy-private`](https://github.com/parnoldx/-omarchy-private) overlay (applied last, if present — see below). The weather popup shows a rain radar only while rain is falling here or forecast today. Night light turns off at sunrise and on at sunset for that same weather location (`hyprsunset-solar.timer` recomputes the solar times daily; sunrise/sunset timers apply the profiles and refresh the bar indicator). The bar indicator is refreshed after resume, because Omarchy only re-reads hyprsunset when told.
 
 Own apps are cloned from GitHub and built locally: [whatsapp-gui](https://github.com/parnoldx/whatsapp-gui) (`make dependencies install`), [omaslitherlink](https://github.com/parnoldx/omaslitherlink) and [omasudoku](https://github.com/parnoldx/omasudoku) (`./install.sh`), plus [omatts](https://github.com/parnoldx/omatts) via its curl installer with the German voice pack. The Grok theme tooling (`omarchy-theme-set-grok`, `patch-grok-omarchy-theme`, `themed/grok.toml.tpl`, and the `sync-grok-theme` hook installed on `theme-set`) keeps Grok's terminal colors in sync with the bar theme.
 
@@ -28,19 +28,19 @@ HA_URL=http://homeassistant.local:8123 HA_TOKEN=... SHELLY_AUTH_KEY=... WEATHER_
 
 ### Private overlay
 
-Secrets and personal config (mailbox/CalDAV passwords, Home Assistant, Shelly, rbw, IBAN/phone/address snippets, git identity, weather location, shell rc) are **not** in this repo. They live in [`parnoldx/omarchy-private`](https://github.com/parnoldx/omarchy-private), encrypted with git-crypt (symmetric key stored in Vaultwarden).
+Secrets and personal config (mailbox/CalDAV passwords, Home Assistant, Shelly, rbw, IBAN/phone/address snippets, git identity, weather location, shell rc) are **not** in this repo. They live in [`parnoldx/-omarchy-private`](https://github.com/parnoldx/-omarchy-private), encrypted with git-crypt (symmetric key stored in Vaultwarden).
 
 At the end of an install, this script applies that overlay if it finds one:
 
 - `OMARCHY_PRIVATE_SRC` — local checkout path, or
-- a checkout at `~/Work/omarchy-private` / `~/.local/src/omarchy-private`, or
-- `OMARCHY_PRIVATE_REPO` — git URL to clone into `~/.local/src/omarchy-private`
+- a checkout at `~/Work/-omarchy-private` / `~/.local/src/-omarchy-private`, or
+- `OMARCHY_PRIVATE_REPO` — git URL to clone into `~/.local/src/-omarchy-private`
 
 The overlay's `install.sh` refuses to run while the checkout is git-crypt-locked, so unlock it first:
 
 ```bash
 git-crypt unlock /path/to/omarchy-private.key   # key: Vaultwarden item omarchy-private-git-crypt
-OMARCHY_PRIVATE_SRC=~/Work/omarchy-private ~/work/omarchy-postinstall/install.sh
+OMARCHY_PRIVATE_SRC=~/Work/-omarchy-private ~/work/omarchy-postinstall/install.sh
 ```
 
 Without the overlay the script installs the non-secret config and prompts/env for credentials as before, so this repo still stands alone.

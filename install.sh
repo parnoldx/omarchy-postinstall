@@ -102,7 +102,7 @@ Mailbox (optional):
 
 Private overlay (optional, secrets + personal config):
   OMARCHY_PRIVATE_SRC   local checkout of the git-crypt repo (default: look in
-                        ~/Work/omarchy-private and ~/.local/src/omarchy-private)
+                        ~/Work/-omarchy-private and ~/.local/src/-omarchy-private)
   OMARCHY_PRIVATE_REPO  git URL to clone if no checkout exists
 EOF
 }
@@ -766,7 +766,7 @@ fi
 # Applied last so it wins over the prompted values written above.
 private_src="${OMARCHY_PRIVATE_SRC:-}"
 if [[ -z $private_src ]]; then
-  for cand in "$HOME/Work/omarchy-private" "$HOME/.local/src/omarchy-private"; do
+  for cand in "$HOME/Work/-omarchy-private" "$HOME/.local/src/-omarchy-private"; do
     if [[ -d $cand ]]; then
       private_src=$cand
       break
@@ -774,7 +774,7 @@ if [[ -z $private_src ]]; then
   done
 fi
 if [[ -z $private_src && -n ${OMARCHY_PRIVATE_REPO:-} ]]; then
-  private_src="$HOME/.local/src/omarchy-private"
+  private_src="$HOME/.local/src/-omarchy-private"
   if [[ ! -d $private_src/.git ]]; then
     command -v git >/dev/null || die "git is not on PATH; cannot clone the private overlay"
     mkdir -p "$(dirname "$private_src")"

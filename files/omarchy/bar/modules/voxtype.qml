@@ -19,7 +19,8 @@ Item {
 
   visible: busy
   readonly property bool showMeter: recording && !(bar && bar.vertical)
-  readonly property int meterWidth: showMeter ? meter.width : 0
+  readonly property int meterGap: 10
+  readonly property int meterWidth: showMeter ? meter.width + meterGap : 0
   implicitWidth: busy ? button.implicitWidth + meterWidth : 0
   implicitHeight: bar ? bar.barSize : 26
 
@@ -67,9 +68,10 @@ Item {
   Item {
     id: meter
     anchors.right: parent.right
+    anchors.rightMargin: root.meterGap
     anchors.verticalCenter: parent.verticalCenter
     width: root.bands * 4 - 2
-    height: parent.height * 0.55
+    height: parent.height * 0.7
     visible: root.showMeter
 
     Repeater {
@@ -77,11 +79,14 @@ Item {
       Rectangle {
         required property int index
         readonly property real v: root.history[index] || 0
+        // Bell curve: the live level gets a bell weight so the wave peaks in the
+        // middle (sigma 1.2 over 6 bands); the idle floor stays uniform and flat.
+        readonly property real bellWeight: 0.25 + 0.75 * Math.exp(-Math.pow(index - (root.bands - 1) / 2.0, 2) / (2 * 1.2 * 1.2))
         x: index * 4
         anchors.verticalCenter: parent.verticalCenter
         width: 2
         radius: 1
-        height: Math.max(2, parent.height * (0.12 + 0.88 * v))
+        height: Math.max(2, parent.height * (0.12 + 0.88 * v * bellWeight))
         color: button.activeColor
         opacity: 0.45 + 0.55 * v
         Behavior on height { NumberAnimation { duration: 60; easing.type: Easing.OutQuad } }
