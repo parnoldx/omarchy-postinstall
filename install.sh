@@ -99,6 +99,11 @@ Mailbox (optional):
   MAILBOX_SRC   existing mailbox-cli checkout; cloned to
                 ~/.local/src/mailbox-cli if unset
   MAILBOX_REPO  git URL (default https://github.com/parnoldx/mailbox-cli.git)
+
+Private overlay (optional, secrets + personal config):
+  OMARCHY_PRIVATE_SRC   local checkout of the git-crypt repo (default: look in
+                        ~/Work/omarchy-private and ~/.local/src/omarchy-private)
+  OMARCHY_PRIVATE_REPO  git URL to clone if no checkout exists
 EOF
 }
 
@@ -753,6 +758,34 @@ if command -v mise >/dev/null; then
   fi
 else
   warn "mise not found; wrote default agent file only"
+fi
+
+# --- private overlay (optional) -----------------------------------------------
+# Secrets and personal config (HA/Shelly/weather/rbw credentials, snippets, git
+# identity, shell rc) live in a separate git-crypt repo, never in this one.
+# Applied last so it wins over the prompted values written above.
+private_src="${OMARCHY_PRIVATE_SRC:-}"
+if [[ -z $private_src ]]; then
+  for cand in "$HOME/Work/omarchy-private" "$HOME/.local/src/omarchy-private"; do
+    if [[ -d $cand ]]; then
+      private_src=$cand
+      break
+    fi
+  done
+fi
+if [[ -z $private_src && -n ${OMARCHY_PRIVATE_REPO:-} ]]; then
+  private_src="$HOME/.local/src/omarchy-private"
+  if [[ ! -d $private_src/.git ]]; then
+    command -v git >/dev/null || die "git is not on PATH; cannot clone the private overlay"
+    mkdir -p "$(dirname "$private_src")"
+    run git clone --depth 1 "$OMARCHY_PRIVATE_REPO" "$private_src"
+  fi
+fi
+if [[ -n $private_src && -x $private_src/install.sh ]]; then
+  log "Applying private overlay: $private_src"
+  "$private_src/install.sh" || warn "private overlay failed; is it git-crypt unlocked?"
+else
+  log "No private overlay found; skipping (set OMARCHY_PRIVATE_SRC or OMARCHY_PRIVATE_REPO)"
 fi
 
 # --- apply -------------------------------------------------------------------
